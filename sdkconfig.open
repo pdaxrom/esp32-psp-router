@@ -1,0 +1,2 @@
+# CONFIG_PSP_AP_WPA1 is not set
+CONFIG_PSP_AP_OPEN=y

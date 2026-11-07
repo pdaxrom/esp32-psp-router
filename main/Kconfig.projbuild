@@ -1,0 +1,27 @@
+menu "PSP USB router"
+    choice PSP_USB_PROFILE
+        prompt "USB host operating system"
+        default PSP_USB_RNDIS
+        config PSP_USB_RNDIS
+            bool "Windows 10/11: RNDIS"
+        config PSP_USB_ECM
+            bool "macOS / Linux: CDC-ECM"
+    endchoice
+
+    choice PSP_AP_SECURITY
+        prompt "Wi-Fi security (never changes automatically)"
+        default PSP_AP_WPA1
+        config PSP_AP_WPA1
+            bool "WPA-PSK / TKIP (PSP compatible)"
+        config PSP_AP_OPEN
+            bool "OPEN diagnostic network (explicit opt-in)"
+    endchoice
+
+    config PSP_AP_PASSWORD
+        string "WPA1 passphrase (8..63 printable ASCII characters)"
+        default "psp3000wifi"
+        depends on PSP_AP_WPA1
+        help
+            Invalid passwords stop startup; they never select an open AP.
+
+endmenu

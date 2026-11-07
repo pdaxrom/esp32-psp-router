@@ -1,0 +1,2 @@
+# CONFIG_PSP_USB_RNDIS is not set
+CONFIG_PSP_USB_ECM=y

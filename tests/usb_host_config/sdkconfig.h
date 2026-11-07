@@ -1,0 +1,1 @@
+#define CONFIG_PSP_USB_ECM 1

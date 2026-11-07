@@ -1,0 +1,10 @@
+cmake_minimum_required(VERSION 3.16)
+set(PSP_TESTED_IDF_COMMIT "fce70533fa1fdeef9f903ce5e87ff8d292be992b")
+option(PSP_ALLOW_UNTESTED_IDF "Allow an ESP-IDF revision that has not been tested" OFF)
+execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "$ENV{IDF_PATH}"
+                OUTPUT_VARIABLE PSP_IDF_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT PSP_IDF_COMMIT STREQUAL PSP_TESTED_IDF_COMMIT AND NOT PSP_ALLOW_UNTESTED_IDF)
+    message(FATAL_ERROR "Use ESP-IDF ${PSP_TESTED_IDF_COMMIT}; see README.md. Override: -DPSP_ALLOW_UNTESTED_IDF=ON")
+endif()
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(psp_usb_router VERSION 1.0.0)
