@@ -13,6 +13,7 @@
 #include "freertos/task.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include "esp_mac.h"
 #include "esp_timer.h"
 #include "lwip/sockets.h"
 #include "browser_proxy.h"
@@ -25,7 +26,8 @@
 static SemaphoreHandle_t s_slots;
 static portMUX_TYPE s_stats_lock = portMUX_INITIALIZER_UNLOCKED;
 static struct { unsigned requests, connect_ms, total_ms, bytes; bool complete; } s_stats;
-typedef struct { int fd; uint32_t epoch; } connection_t;
+static struct { unsigned accepted, requests, errors; esp_ip4_addr_t last_ip; } s_lan_stats;
+typedef struct { int fd; uint32_t epoch; bool lan; } connection_t;
 typedef struct {
     char content_type[128], location[PROXY_URL_MAX], encoding[32];
     bool bad;
@@ -113,7 +115,8 @@ static esp_err_t http_event(esp_http_client_event_t *event)
 
 static void home(int fd, bool head, router_network_state_t state)
 {
-    char *html = malloc(2048);
+    const size_t capacity = 3072;
+    char *html = malloc(capacity);
     if (!html) { message(fd, 503, "Out of resources. Retry later.\n", head); return; }
     char address[16], wan[16], dns[16];
     snprintf(address, sizeof(address), IPSTR, IP2STR(&state.lan.ip));
@@ -121,14 +124,20 @@ static void home(int fd, bool head, router_network_state_t state)
     snprintf(dns, sizeof(dns), IPSTR, IP2STR(&state.dns));
     unsigned requests, connect_ms, total_ms, bytes;
     bool complete;
+    unsigned lan_accepted, lan_requests, lan_errors;
+    esp_ip4_addr_t last_lan_ip;
     portENTER_CRITICAL(&s_stats_lock);
     requests = s_stats.requests;
     connect_ms = s_stats.connect_ms;
     total_ms = s_stats.total_ms;
     bytes = s_stats.bytes;
     complete = s_stats.complete;
+    lan_accepted = s_lan_stats.accepted;
+    lan_requests = s_lan_stats.requests;
+    lan_errors = s_lan_stats.errors;
+    last_lan_ip = s_lan_stats.last_ip;
     portEXIT_CRITICAL(&s_stats_lock);
-    int n = snprintf(html, 2048, "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+    int n = snprintf(html, capacity, "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
         "Connection: close\r\nCache-Control: no-store\r\n\r\n"
         "<!DOCTYPE HTML><html><head><title>PSP Router</title></head><body>"
         "<h1>PSP Router</h1><p>USB network: %s. WAN: %s. LAN: %s. Upstream DNS: %s.</p>"
@@ -138,17 +147,42 @@ static void home(int fd, bool head, router_network_state_t state)
         "<input type='submit' value='Open'></form>"
         "<p>Simple public pages only. GET/HEAD supported; logins, modern JavaScript, WebP/AVIF and video are not adapted.</p>"
         "<p>Fetches: %u. Last: %s, %u bytes, connection %u ms, total %u ms. "
-        "Connection includes DNS, TCP and TLS; total includes delivery to this browser.</p>"
-        "</body></html>", state.online ? "configured" : "offline", wan, address, dns,
+        "Connection includes DNS, TCP and TLS; total includes delivery to this browser.</p>",
+        state.online ? "configured" : "offline", wan, address, dns,
         time(NULL) >= 1704067200 ? "ready" : "synchronizing", address, CONFIG_PSP_PROXY_PORT,
         requests, complete ? "complete" : "not complete", bytes, connect_ms, total_ms);
-    if (n > 0 && n < 2048) {
+    router_lan_status_t lan = router_network_lan_status();
+    if (n <= 0 || (size_t)n >= capacity) goto end;
+    int written = snprintf(html + n, capacity - n,
+        "<h2>Wi-Fi LAN</h2><p>Interface: %s. DHCP server: %s. Client list: %s. "
+        "DHCP lookup: %s. ARP lookup: %s.</p>"
+        "<p>LAN TCP connections: %u. HTTP requests: %u. Invalid/incomplete requests: %u. "
+        "Last LAN peer: " IPSTR ".</p><ul>",
+        lan.up ? "up" : "down", lan.dhcp_running ? "running" : "stopped",
+        lan.clients_valid ? "available" : "unavailable", lan.dhcp_valid ? "available" : "unavailable",
+        lan.arp_valid ? "available" : "unavailable", lan_accepted, lan_requests, lan_errors,
+        IP2STR(&last_lan_ip));
+    if (written < 0 || (size_t)written >= capacity - n) goto end;
+    n += written;
+    for (unsigned i = 0; i < lan.count; ++i) {
+        const router_wifi_client_t *client = &lan.clients[i];
+        written = snprintf(html + n, capacity - n,
+            "<li>" MACSTR ": DHCP " IPSTR ", ARP " IPSTR ", RSSI %d dBm</li>",
+            MAC2STR(client->mac), IP2STR(&client->dhcp_ip), IP2STR(&client->arp_ip), client->rssi);
+        if (written < 0 || (size_t)written >= capacity - n) goto end;
+        n += written;
+    }
+    written = snprintf(html + n, capacity - n, "</ul></body></html>");
+    if (written < 0 || (size_t)written >= capacity - n) goto end;
+    n += written;
+    {
         if (head) {
             char *end = strstr(html, "\r\n\r\n");
             if (end) n = end - html + 4;
         }
         send_all(fd, html, n, 0);
     }
+end:
     free(html);
 }
 
@@ -291,6 +325,12 @@ static void worker(void *arg)
     if (!header || !request) { message(fd, 503, "Out of resources.\n", false); goto end; }
     int length = read_header(fd, header);
     int error = length < 0 ? -length : proxy_parse_request(header, length, request);
+    if (connection->lan) {
+        portENTER_CRITICAL(&s_stats_lock);
+        if (error) ++s_lan_stats.errors;
+        else ++s_lan_stats.requests;
+        portEXIT_CRITICAL(&s_stats_lock);
+    }
     if (error) {
         message(fd, error, "Only GET/HEAD with http:// addresses are supported. CONNECT keeps PSP TLS and is unavailable.\n", request->head);
         goto end;
@@ -369,13 +409,21 @@ static void server(void *arg)
             close(fd);
             continue;
         }
+        bool lan = (peer.sin_addr.s_addr & state.lan.netmask.addr) ==
+                   (bound & state.lan.netmask.addr);
+        if (lan) {
+            portENTER_CRITICAL(&s_stats_lock);
+            ++s_lan_stats.accepted;
+            s_lan_stats.last_ip.addr = peer.sin_addr.s_addr;
+            portEXIT_CRITICAL(&s_stats_lock);
+        }
         if (xSemaphoreTake(s_slots, 0) != pdTRUE) {
             message(fd, 503, "Two requests are already active. Retry shortly.\n", false);
             close(fd);
             continue;
         }
         connection_t *connection = malloc(sizeof(*connection));
-        if (connection) *connection = (connection_t){.fd = fd, .epoch = state.epoch};
+        if (connection) *connection = (connection_t){.fd = fd, .epoch = state.epoch, .lan = lan};
         if (!connection || xTaskCreate(worker, "browser_fetch", 12288, connection, 4, NULL) != pdPASS) {
             free(connection);
             close(fd);

@@ -1,4 +1,4 @@
-# PSP Router 2.0 — ESP32-S3 USB WAN / Wi-Fi LAN
+# PSP Router 2.1.3 — ESP32-S3 USB WAN / Wi-Fi LAN
 
 Прошивка на C / ESP-IDF для Super Mini ESP32-S3 HW-747, проверенного чипа
 ESP32-S3FH4R2: **4 МиБ Flash, 2 МиБ Quad SPI PSRAM**. Дополнительные аппаратные
@@ -11,13 +11,30 @@ ESP32-S3FH4R2: **4 МиБ Flash, 2 МиБ Quad SPI PSRAM**. Дополнител
                  │ WAN ESP: DHCP-клиент, IP/шлюз/DNS от компьютера
             ESP32-S3: IPv4 NAPT
                  │ Wi-Fi LAN: 192.168.50.1/24, свой DHCP и DNS relay
-                 │ PSP-NET / 802.11b / канал 6 / WPA1-PSK TKIP
+                 │ PSP-NET / 802.11b / канал 6 / WPA2-PSK AES-CCMP
               PSP-3000
 ```
 
 Вариант 1, прозрачный bridge, сохранён отдельным режимом сборки. Проверенный
 релиз 1.0.0 находится в коммите `692b7ec`, его аппаратный отчёт —
 [docs/TEST_REPORT_V1.md](docs/TEST_REPORT_V1.md).
+
+Начиная с 2.1.0 по умолчанию включён **WPA2-PSK / AES-CCMP** для ARK-5 с активным
+**WPA2 Support**. PMF отключён. Требования сверены с
+[исходником ARK-5](https://github.com/PSP-Arkfive/ARK-5/blob/28eec331e46445b101f769161a3c4c148e9d1c14/Compat/PSP/src/wpa2.c).
+Для обычной прошивки PSP выбирайте отдельную сборку **wpa1**.
+
+**WPA2/AES подтверждён на PSP-3000 с 6.61 ARK-5 cIPL после полного перезапуска PSP.**
+Журнал показал M1 → M2 → M3 → M4 и подключение станции со штатным EAPOL v2.
+До перезапуска после изменения WPA2 Support обмен зацикливался до таймаута.
+Рабочая WPA1-версия 2.0.1 сохранена в коммите `350a84a`.
+
+**2.1.3 проверена на PSP: локальная страница и zond.am через proxy работают
+с WPA2/AES без радиозахвата.** Исправлена задержка TCP-ответов до обновления ARP:
+прошивка сохраняет DHCP-привязки IP/MAC только для подключённых WPA2-клиентов
+и удаляет их при уходе клиента, смене аренды или LAN-подсети. Перехватчиков WPA,
+USB-консоли, команд изменения EAPOL и временных debug-маршрутов нет.
+[Подробности и пакетные наблюдения](docs/TEST_REPORT_WPA2_DATA.md).
 
 ## Сеть и браузерный прокси
 
@@ -41,7 +58,7 @@ ESP. USB получает отдельную аренду компьютера; 
 Без неё IDF 6.x может отвергать корректную цепочку, даже если её корень есть в
 bundle. [Описание Espressif](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/api-reference/protocols/esp_crt_bundle.html#cross-signed-certificate-support).
 
-PSP получает страницы по HTTP. Радиоканал PSP↔ESP шифруется WPA1/TKIP;
+PSP получает страницы по HTTP. Радиоканал PSP↔ESP по умолчанию шифруется WPA2/AES-CCMP;
 HTTPS между ESP и сайтом завершается на ESP, сквозного TLS до PSP здесь нет.
 Просроченные корни PSP при таком обращении не используются.
 
@@ -60,7 +77,7 @@ HTTPS между ESP и сайтом завершается на ESP, сквоз
 - Ошибка сертификата/HTTPS даёт 502; автоматического обхода проверки или отката
   на незашифрованный upstream нет. HTTP-only сайты открывайте без прокси.
 
-На PSP подтверждено открытие ya.ru, zond.am и pdaxrom.org. Современная вёрстка
+На PSP с WPA1/2.0.1 подтверждено открытие ya.ru, zond.am и pdaxrom.org. Современная вёрстка
 последних двух отображается некорректно: шлюз передаёт HTML/CSS, преобразование
 оформления для старого браузера не выполняется.
 
@@ -71,9 +88,12 @@ CONNECT лишь передаёт TLS между PSP и сайтом и не и�
 На `http://192.168.50.1:8080/` находится простая стартовая страница, поле адреса
 и последние замеры. Connection включает DNS/TCP/TLS, Total также включает
 передачу клиенту; это не отдельный бенчмарк криптографии.
+Страница также показывает подключённые Wi-Fi клиенты,
+выданные DHCP-адреса и число LAN TCP/HTTP запросов. Адрес в ARP-таблице может
+быть создан DHCP-сервером и сам по себе не подтверждает доступность клиента.
 
 На проверенной ESP32-S3 три HTTPS-загрузки по 64 КиБ через USB заняли
-4,26–4,32 с каждая, включая 2,90–2,93 с установки соединения: около 15 КиБ/с
+4,11–4,21 с каждая, включая 2,79–2,80 с установки соединения: около 15,2–15,6 КиБ/с
 за весь запрос. Это измерение с USB-компьютера; скорость браузера PSP и Wi-Fi
 пока не измерена. Условия и выполненные проверки — в [TEST_REPORT.md](TEST_REPORT.md).
 
@@ -122,30 +142,32 @@ HTTP-клиент, TLS, CA bundle, SNTP и NAPT входят в закреплё
 - [TinyUSB net_lwip_webserver / ECM и RNDIS](https://github.com/hathach/tinyusb/tree/0.21.0/examples/device/net_lwip_webserver)
 - [Microsoft OS 2.0 descriptors](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/microsoft-os-2-0-descriptors-specification)
 
-Managed-компоненты и установленная ESP-IDF не патчатся. EAPOL v1 для WPA1/TKIP
-задаётся linker-wrapper, собранным с тем же private ABI, что и wpa_supplicant.
+Managed-компоненты и установленная ESP-IDF не патчатся. В WPA2 используется
+штатный RSN/EAPOL v2 ESP-IDF. EAPOL v1 linker-wrapper включается только в
+явно выбранной WPA1/TKIP-сборке с тем же private ABI, что и wpa_supplicant.
 
 ## Сборка
 
 ```sh
 . "$HOME/Work/ESP/esp-idf/export.sh"
-sh tools/build.sh ecm                 # macOS/Linux, WPA1, router + proxy
-sh tools/build.sh rndis               # Windows, WPA1, router + proxy
+sh tools/build.sh ecm                 # macOS/Linux, WPA2/AES, router + proxy
+sh tools/build.sh rndis               # Windows, WPA2/AES, router + proxy
+sh tools/build.sh ecm wpa1 router      # WPA1/TKIP для PSP без WPA2-патча
 sh tools/build.sh ecm wpa1 bridge      # прежний прозрачный bridge
 sh tools/build.sh ecm open router     # явно открытая диагностическая сеть
 ```
 
-Аргументы: `[rndis|ecm] [wpa1|open] [router|bridge]`.
-Каталоги отдельные: `build-ecm-router`, `build-rndis-router`,
-`build-ecm-bridge`, `build-ecm-open-router`. Профили ОС выбираются при сборке;
+Аргументы: `[rndis|ecm] [wpa2|wpa1|open] [router|bridge]`.
+Каталоги отдельные: `build-ecm-wpa2-router`, `build-rndis-wpa2-router`,
+`build-ecm-wpa1-router`, `build-ecm-wpa1-bridge`, `build-ecm-open-router`. Профили ОС выбираются при сборке;
 автоматического переключения защиты нет. VID/PID прототипа: RNDIS 303a:4011,
 ECM 303a:4012. Перед распространением устройства нужна назначенная VID/PID-пара.
 
 Пароль по умолчанию **psp3000wifi**. Изменение:
 
 ```sh
-idf.py -B build-ecm-router -DSDKCONFIG=build-ecm-router/sdkconfig menuconfig
-# PSP USB router → WPA1 passphrase
+idf.py -B build-ecm-wpa2-router -DSDKCONFIG=build-ecm-wpa2-router/sdkconfig menuconfig
+# PSP USB router → Wi-Fi passphrase
 sh tools/build.sh ecm
 ```
 
@@ -155,8 +177,8 @@ sh tools/build.sh ecm
 конфигурации. В Windows PowerShell с активированной средой ESP-IDF:
 
 ```powershell
-idf.py -B build-rndis-router -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-rndis-router/sdkconfig build
-python tools/check_build.py build-rndis-router --profile rndis --mode router
+idf.py -B build-rndis-wpa2-router -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-rndis-wpa2-router/sdkconfig build
+python tools/check_build.py build-rndis-wpa2-router --profile rndis --mode router
 ```
 
 ## Прошивка
@@ -166,15 +188,15 @@ python tools/check_build.py build-rndis-router --profile rndis --mode router
 3. Прошейте нужную сборку (подставьте ROM-порт, COMx в Windows):
 
    ```sh
-   idf.py -B build-ecm-router -DSDKCONFIG=build-ecm-router/sdkconfig \
+   idf.py -B build-ecm-wpa2-router -DSDKCONFIG=build-ecm-wpa2-router/sdkconfig \
      -p /dev/cu.usbmodemXXXX flash
    ```
 
 4. Если приложение не запустилось автоматически, нажмите RESET без BOOT.
    ROM-порт исчезнет и появится USB-сеть; отсутствие последовательного порта ожидаемо.
 
-Полный образ `dist/psp-router-ecm-wpa1.bin` записывается по **0x0**.
-Один `build-ecm-router/psp_usb_router.bin` — только приложение по **0x10000**.
+Полный образ `dist/psp-router-ecm-wpa2.bin` записывается по **0x0**.
+Один `build-ecm-wpa2-router/psp_usb_router.bin` — только приложение по **0x10000**.
 Полный объединённый образ перезаписывает и промежутки, включая NVS.
 Для обновления без стирания NVS используйте `idf.py flash`.
 Сохранённый рабочий bridge 1.0.0: `dist/psp-bridge-ecm-v1.0.0.bin`.
@@ -224,14 +246,20 @@ sudo nmcli connection up psp-usb
 
 ## Подключение PSP
 
-**ARK-5: выключите WPA2 Support в настройках CFW.** На проверенной PSP именно
-включённый WPA2 вызывал циклический обмен ключами и таймаут при WPA1/TKIP.
-После отключения прежний релиз успешно работал.
+По умолчанию используется **WPA2-PSK / AES-CCMP** для ARK-5.
+Включите **WPA2 Support** в настройках CFW и полностью выключите PSP,
+удерживая ползунок питания вверх 4–5 секунд, затем включите консоль.
+Это обеспечивает повторную загрузку сетевого модуля с патчем.
+Создайте новое подключение к **PSP-NET**, чтобы
+прежний профиль TKIP не сохранил старый режим защиты.
 
 1. Включите WLAN, Infrastructure Mode → Scan → **PSP-NET**.
-2. Выберите **WPA-PSK (TKIP)**, пароль **psp3000wifi**.
+2. Выберите защиту с **AES** (в интерфейсе PSP она может называться
+   **WPA-PSK (AES)**), пароль **psp3000wifi**.
 3. IP и DNS — Automatic, для прямого NAT-доступа Proxy — Do Not Use.
-4. В режиме router ожидается IP 192.168.50.x, шлюз/DNS 192.168.50.1.
+4. В режиме router PSP должна получить **собственный IP 192.168.50.2–192.168.50.101**,
+   маску 255.255.255.0, шлюз/DNS 192.168.50.1. Адрес **192.168.50.1 принадлежит ESP**;
+   назначение его самой PSP создаёт конфликт и таймаут даже при открытии локальной страницы.
 5. Для браузерного шлюза отредактируйте это подключение: Proxy → Use,
    Address **192.168.50.1**, Port **8080**. При смене LAN используйте новый шлюз PSP.
 6. Откройте **http://192.168.50.1:8080/**, затем **http://httpbingo.org/html**.
@@ -239,12 +267,16 @@ sudo nmcli connection up psp-usb
 
 Можно сохранить два соединения с одним SSID: одно без прокси, второе с прокси.
 
+Для явной сборки `wpa1` используйте **WPA-PSK (TKIP)** и **выключите WPA2 Support**
+в ARK-5, затем перезапустите PSP. Этот режим сохранён для обычной прошивки Sony
+и прежних подключений; автоматического перехода между WPA2/WPA1/OPEN нет.
+
 ## Проверки и отключения
 
 ```sh
 sh tools/test_host.sh
-python tools/check_build.py build-ecm-router --profile ecm --mode router
-python tools/check_build.py build-ecm-bridge --profile ecm --mode bridge
+python tools/check_build.py build-ecm-wpa2-router --profile ecm --mode router
+python tools/check_build.py build-ecm-wpa1-bridge --profile ecm --security wpa1 --mode bridge
 python tools/test_router_live.py WAN_IP_ESP --report dist/router-live.json
 ```
 

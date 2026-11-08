@@ -23,13 +23,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("build", type=Path)
     parser.add_argument("--profile", choices=["rndis", "ecm"], required=True)
-    parser.add_argument("--security", choices=["wpa1", "open"], default="wpa1")
+    parser.add_argument("--security", choices=["wpa2", "wpa1", "open"], default="wpa2")
     parser.add_argument("--mode", choices=["router", "bridge"], default="router")
     args = parser.parse_args()
     build = args.build.resolve()
     project = json.loads((build / "project_description.json").read_text())
     assert project["target"] == "esp32s3"
     config = Path(project["config_file"]).read_text()
+    wpa_wrapper = args.security == "wpa1"
     required = [
         'CONFIG_ESPTOOLPY_FLASHSIZE="4MB"',
         "CONFIG_ESPTOOLPY_FLASHMODE_QIO=y",
@@ -52,15 +53,23 @@ def main():
         required += ["CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y", "CONFIG_MBEDTLS_HAVE_TIME_DATE=y",
                      "CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y",
                      "CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y"]
+    if args.mode == "router" and args.security == "wpa2":
+        required += ["CONFIG_LWIP_DHCPS_STATIC_ENTRIES=y"]
     for setting in required:
         assert setting in config.splitlines(), f"Missing setting: {setting}"
     commands = json.loads((build / "compile_commands.json").read_text())
-    wpa_defines = []
-    for name in ("wpa_compat.c", "esp_hostap.c"):
-        command = next(c for c in commands if c["file"].endswith("/" + name))
-        assert "esp-idf/wpa_supplicant/" in command["command"]
-        wpa_defines.append({s for s in shlex.split(command["command"]) if s.startswith("-D")})
-    assert wpa_defines[0] == wpa_defines[1], "WPA compatibility wrapper ABI differs from authenticator"
+    for security in ("wpa2", "wpa1", "open"):
+        if security != args.security:
+            assert f"CONFIG_PSP_AP_{security.upper()}=y" not in config.splitlines(), "Multiple security profiles"
+    if wpa_wrapper:
+        wpa_defines = []
+        for name in ("wpa_compat.c", "esp_hostap.c"):
+            command = next(c for c in commands if c["file"].endswith("/" + name))
+            assert "esp-idf/wpa_supplicant/" in command["command"]
+            wpa_defines.append({s for s in shlex.split(command["command"]) if s.startswith("-D")})
+        assert wpa_defines[0] == wpa_defines[1], "WPA compatibility wrapper ABI differs from authenticator"
+    else:
+        assert not any(c["file"].endswith("/wpa_compat.c") for c in commands), "Legacy EAPOL wrapper in non-WPA1 build"
     for setting in ["CONFIG_SECURE_BOOT=y", "CONFIG_SECURE_FLASH_ENC_ENABLED=y",
                     "CONFIG_ESP_CONSOLE_USB_CDC=y", "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y",
                     "CONFIG_ESP_TLS_INSECURE=y", "CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y"]:
@@ -68,6 +77,8 @@ def main():
     with (build / "psp_usb_router.elf").open("rb") as stream:
         elf = ELFFile(stream)
         symbols = {s.name: s for s in elf.get_section_by_name(".symtab").iter_symbols()}
+        assert ("sync_lan_neighbors" in symbols) == (args.mode == "router" and args.security == "wpa2"), \
+            "DHCP-derived ARP compatibility must be confined to WPA2 router builds"
 
         def read_symbol(name):
             s = symbols[name]
@@ -113,13 +124,20 @@ def main():
             assert ("browser_proxy_start" in symbols) == proxy_enabled
             if proxy_enabled:
                 assert "esp_crt_bundle_attach" in symbols
-        assert "__wrap_wpa_init" in symbols
+        assert ("__wrap_wpa_init" in symbols) == wpa_wrapper
         for name in ["__wrap_wpa_receive", "__wrap_hostapd_send_eapol", "__wrap_esp_wifi_internal_tx",
+                     "wifi_diag_json", "wifi_diag_frame", "wifi_diag_set_eapol_version",
                      "router_console_poll", "wifi_trace_start", "usb_diag_start", "cdcd_open"]:
             assert name not in symbols, f"Debug/forced-rate code in release: {name}"
+        for section in elf.iter_sections():
+            if section["sh_type"] == "SHT_PROGBITS" and section["sh_flags"] & 2:
+                assert b"/debug/wifi" not in section.data(), "Diagnostic HTTP route in release"
     link_map = (build / "psp_usb_router.map").read_text()
-    init_refs = link_map.split("\n__wrap_wpa_init ", 1)[1].split("\n", 2)[:2]
-    assert "esp_hostap.c.obj" in "\n".join(init_refs), "Authenticator initialization bypasses compatibility wrapper"
+    if wpa_wrapper:
+        init_refs = link_map.split("\n__wrap_wpa_init ", 1)[1].split("\n", 2)[:2]
+        assert "esp_hostap.c.obj" in "\n".join(init_refs), "Authenticator initialization bypasses compatibility wrapper"
+    else:
+        assert "__wrap_wpa_init" not in link_map, "Legacy EAPOL linker override in non-WPA1 build"
     print(f"PASS: {args.profile}/{args.security}/{args.mode}: target, memory/recovery, USB descriptors, network mode")
 
 

@@ -84,6 +84,10 @@ static void init_wifi(void)
             .pmf_cfg = {.required = false},
 #if CONFIG_PSP_AP_OPEN
             .authmode = WIFI_AUTH_OPEN,
+#elif CONFIG_PSP_AP_WPA2
+            .password = CONFIG_PSP_AP_PASSWORD,
+            .authmode = WIFI_AUTH_WPA2_PSK,
+            .pairwise_cipher = WIFI_CIPHER_TYPE_CCMP,
 #else
             .password = CONFIG_PSP_AP_PASSWORD,
             .authmode = WIFI_AUTH_WPA_PSK,
@@ -104,9 +108,13 @@ static void init_wifi(void)
     ESP_ERROR_CHECK(esp_wifi_get_protocol(WIFI_IF_AP, &protocol));
     ESP_LOGI(TAG, "AP readback: auth=%d cipher=%d protocol=0x%02x channel=%u",
              actual.ap.authmode, actual.ap.pairwise_cipher, protocol, actual.ap.channel);
-    bool correct = protocol == WIFI_PROTOCOL_11B && actual.ap.channel == 6 && !actual.ap.ssid_hidden;
+    bool correct = protocol == WIFI_PROTOCOL_11B && actual.ap.channel == 6 && !actual.ap.ssid_hidden &&
+                   !actual.ap.pmf_cfg.required && !actual.ap.pmf_cfg.capable;
 #if CONFIG_PSP_AP_OPEN
     correct = correct && actual.ap.authmode == WIFI_AUTH_OPEN;
+#elif CONFIG_PSP_AP_WPA2
+    correct = correct && actual.ap.authmode == WIFI_AUTH_WPA2_PSK &&
+              actual.ap.pairwise_cipher == WIFI_CIPHER_TYPE_CCMP;
 #else
     correct = correct && actual.ap.authmode == WIFI_AUTH_WPA_PSK &&
               actual.ap.pairwise_cipher == WIFI_CIPHER_TYPE_TKIP;

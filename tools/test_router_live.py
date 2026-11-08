@@ -48,6 +48,12 @@ def main():
         time.sleep(2)
     print("PASS: USB host access, HTTP/1.0 home page, synchronized clock", flush=True)
 
+    for path in ("/debug/wifi", "/debug/wifi/eapol/1", "/debug/wifi/eapol/2"):
+        status, body, _ = request(path)
+        assert status == 404, (path, status, body[:160])
+    results["diagnostic_routes_absent"] = True
+    print("PASS: temporary Wi-Fi diagnostic routes are absent", flush=True)
+
     query_id = secrets.randbits(16)
     query = struct.pack("!HHHHHH", query_id, 0x100, 1, 0, 0, 0)
     query += b"\x07example\x03com\0" + struct.pack("!HH", 1, 1)

@@ -30,7 +30,9 @@ menu "PSP USB router"
 
     choice PSP_AP_SECURITY
         prompt "Wi-Fi security (never changes automatically)"
-        default PSP_AP_WPA1
+        default PSP_AP_WPA2
+        config PSP_AP_WPA2
+            bool "WPA2-PSK / AES-CCMP (ARK-5 WPA2 Support enabled)"
         config PSP_AP_WPA1
             bool "WPA-PSK / TKIP (PSP compatible)"
         config PSP_AP_OPEN
@@ -38,9 +40,9 @@ menu "PSP USB router"
     endchoice
 
     config PSP_AP_PASSWORD
-        string "WPA1 passphrase (8..63 printable ASCII characters)"
+        string "Wi-Fi passphrase (8..63 printable ASCII characters)"
         default "psp3000wifi"
-        depends on PSP_AP_WPA1
+        depends on PSP_AP_WPA1 || PSP_AP_WPA2
         help
             Invalid passwords stop startup; they never select an open AP.
 
