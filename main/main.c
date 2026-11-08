@@ -23,6 +23,7 @@
 #include "browser_proxy.h"
 #include "bridge_proxy.h"
 #include "bridge_dns.h"
+#include "status_rgb.h"
 
 static const char *TAG = "psp_bridge";
 static EventGroupHandle_t s_events;
@@ -39,12 +40,14 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
             xEventGroupSetBits(s_events, AP_STARTED);
         } else if (id == WIFI_EVENT_AP_STACONNECTED) {
             const wifi_event_ap_staconnected_t *e = data;
+            status_rgb_station(e->mac, true);
 #if CONFIG_PSP_BRIDGE_PROXY
             bridge_proxy_station_event(e->mac, true);
 #endif
             ESP_LOGI(TAG, "Wi-Fi client " MACSTR " joined (AID %d)", MAC2STR(e->mac), e->aid);
         } else if (id == WIFI_EVENT_AP_STADISCONNECTED) {
             const wifi_event_ap_stadisconnected_t *e = data;
+            status_rgb_station(e->mac, false);
 #if CONFIG_PSP_BRIDGE_PROXY
             bridge_proxy_station_event(e->mac, false);
 #endif
@@ -234,6 +237,11 @@ void app_main(void)
 #endif
 #endif
 
+#if CONFIG_PSP_MODE_BRIDGE
+    status_rgb_init(s_bridge);
+#else
+    status_rgb_init(s_usb);
+#endif
     bool link_up = false;
     uint32_t previous_epoch = 0;
     for (;;) {
@@ -267,6 +275,7 @@ void app_main(void)
 #elif CONFIG_PSP_BRIDGE_PROXY
         bridge_proxy_poll(link_up);
 #endif
+        status_rgb_poll(link_up, usb.epoch);
         /* Never stop/recreate a bridge port on USB resets: lwIP's FDB retains
          * netif pointers and has no remove-port API. Only change link/up state.
          */

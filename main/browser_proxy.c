@@ -21,6 +21,7 @@
 #include "router_network.h"
 #include "router_policy.h"
 #include "bridge_dns.h"
+#include "status_rgb.h"
 
 #define PROXY_CLIENTS 2
 #define BODY_LIMIT (4 * 1024 * 1024)
@@ -173,6 +174,14 @@ static void home(int fd, bool head, router_network_state_t state)
         IP2STR(&last_lan_ip));
     if (written < 0 || (size_t)written >= capacity - n) goto end;
     n += written;
+    status_rgb_state_t light = status_rgb_state();
+    if (light.enabled) {
+        written = snprintf(html + n, capacity - n,
+            "<li>Status light: USB %s, internet %s, Wi-Fi clients %u.</li>",
+            light.usb ? "active" : "offline", light.internet ? "reachable" : "not verified", light.clients);
+        if (written < 0 || (size_t)written >= capacity - n) goto end;
+        n += written;
+    }
     if (state.bridge_mode) {
         written = snprintf(html + n, capacity - n,
             "<li>Name psp-proxy: %u intercepted replies, %u direct DNS replies. "

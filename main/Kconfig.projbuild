@@ -1,4 +1,18 @@
 menu "PSP USB router"
+    config PSP_STATUS_RGB
+        bool "Onboard GPIO48 RGB status light"
+        default y
+        help
+            Red: USB network offline. Amber: USB active, internet not verified.
+            Green: external HTTP probe succeeded. A short cyan pulse every two
+            seconds indicates associated Wi-Fi clients. Uses one RMT channel.
+
+    config PSP_STATUS_RGB_BRIGHTNESS
+        int "RGB brightness (0-255 scale)"
+        depends on PSP_STATUS_RGB
+        range 1 64
+        default 16
+
     choice PSP_NETWORK_MODE
         prompt "Network architecture"
         default PSP_MODE_ROUTER

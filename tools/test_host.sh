@@ -7,6 +7,9 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
     -I main main/bridge_policy.c tests/test_bridge_policy.c -o "$test_binary"
 "$test_binary"
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+    -I main main/status_probe.c tests/test_status_probe.c -o "$test_binary"
+"$test_binary"
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
     -I main main/bridge_dns.c tests/test_bridge_dns.c -o "$test_binary"
 "$test_binary"
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \

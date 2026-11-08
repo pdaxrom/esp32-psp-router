@@ -48,6 +48,7 @@ def main():
         f"CONFIG_PSP_MODE_{'BRIDGE' if bridge else 'ROUTER'}=y",
     ]
     proxy_enabled = "CONFIG_PSP_HTTP_PROXY=y" in config.splitlines()
+    rgb_enabled = "CONFIG_PSP_STATUS_RGB=y" in config.splitlines()
     assert ("CONFIG_PSP_BRIDGE_PROXY=y" in config.splitlines()) == bridge_proxy
     if bridge:
         assert proxy_enabled == bridge_proxy, "Use a separate bridge-proxy build for the gateway"
@@ -82,6 +83,8 @@ def main():
     with (build / "psp_usb_router.elf").open("rb") as stream:
         elf = ELFFile(stream)
         symbols = {s.name: s for s in elf.get_section_by_name(".symtab").iter_symbols()}
+        for name in ("rmt_new_tx_channel", "start_dns", "probe_task"):
+            assert (name in symbols) == rgb_enabled, f"Wrong RGB/probe configuration: {name}"
         assert ("sync_lan_neighbors" in symbols) == (args.mode == "router" and args.security == "wpa2"), \
             "DHCP-derived ARP compatibility must be confined to WPA2 router builds"
 
