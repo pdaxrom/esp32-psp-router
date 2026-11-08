@@ -1,377 +1,263 @@
-# USB ↔ Wi-Fi bridge для PSP-3000 / ESP32-S3 HW-747
+# PSP Router 2.0 — ESP32-S3 USB WAN / Wi-Fi LAN
 
-Прошивка на C / ESP-IDF для Super Mini ESP32-S3 с чипом **ESP32-S3FH4R2**.
-Нужны плата, кабель USB с передачей данных, компьютер и PSP. Дополнительные
-аппаратные модули не используются.
-
-**По уточнённому заданию реализован прозрачный L2 bridge.** USB и Wi-Fi находятся
-в одной подсети. IP, маску, шлюз и DNS PSP получает непосредственно от DHCP-сервера
-компьютера. NAPT, DHCP-сервер и DNS-прокси на ESP отсутствуют. Компьютер по-прежнему
-должен раздавать интернет: его Internet Sharing / ICS выполняет маршрутизацию/NAT
-между своей внешней сетью и USB. Режим «Сетевой мост» на компьютере для этой схемы
-включать не нужно.
+Прошивка на C / ESP-IDF для Super Mini ESP32-S3 HW-747, проверенного чипа
+ESP32-S3FH4R2: **4 МиБ Flash, 2 МиБ Quad SPI PSRAM**. Дополнительные аппаратные
+модули не нужны. Компьютер раздаёт интернет через native USB-C
+(**GPIO19 D−, GPIO20 D+**); ESP маршрутизирует трафик PSP.
 
 ```text
-Интернет → Wi-Fi/Ethernet компьютера → общий доступ (DHCP, DNS, NAT)
-                                      │
-                               USB RNDIS / ECM
-                                      │
-                             ESP32-S3: L2 bridge
-                                      │
-                    PSP-NET, канал 6, 802.11b, WPA1/TKIP
-                                      │
-                                   PSP-3000
+Интернет → компьютер с Internet Sharing / ICS
+                 │ USB RNDIS (Windows) / CDC-ECM (macOS/Linux)
+                 │ WAN ESP: DHCP-клиент, IP/шлюз/DNS от компьютера
+            ESP32-S3: IPv4 NAPT
+                 │ Wi-Fi LAN: 192.168.50.1/24, свой DHCP и DNS relay
+                 │ PSP-NET / 802.11b / канал 6 / WPA1-PSK TKIP
+              PSP-3000
 ```
 
-Например, при Windows ICS компьютер может иметь `192.168.137.1/24`, bridge ESP —
-`192.168.137.2`, PSP — `192.168.137.3`. Конкретные адреса назначает компьютер;
-эти значения не зашиты в прошивку. DHCP-клиент ESP работает на логическом `br0`
-для диагностического адреса. Физические порты USB/AP не имеют собственных IP.
-Передача кадров PSP не зависит от получения ESP диагностической аренды.
+Вариант 1, прозрачный bridge, сохранён отдельным режимом сборки. Проверенный
+релиз 1.0.0 находится в коммите `692b7ec`, его аппаратный отчёт —
+[docs/TEST_REPORT_V1.md](docs/TEST_REPORT_V1.md).
 
-## Зафиксированные версии и изученные примеры
+## Сеть и браузерный прокси
 
-Использована доступная локально ESP-IDF:
+По умолчанию Wi-Fi имеет **192.168.50.1/24**. PSP получает адрес, шлюз и DNS от
+ESP. USB получает отдельную аренду компьютера; например, macOS выдаёт WAN ESP
+`192.168.2.x/24`, а шлюз/DNS компьютера — `192.168.2.1`. Это две разные подсети.
+При пересечении WAN с LAN выбирается другая частная /24: 192.168.51.0,
+172.31.50.0 или 10.77.0.0. После смены LAN PSP переподключается для новой аренды.
+Если подходящей подсети нет, NAPT не включается.
 
-| Зависимость | Версия |
+Без настройки прокси PSP использует обычный NAT: приложения, игры и HTTP идут
+напрямую. Для старого браузера есть отдельный **HTTP→HTTPS шлюз на ESP**, порт
+**8080**. Он обращается к сайтам по HTTPS, проверяет цепочку, имя и сроки
+сертификата с корневыми CA из ESP-IDF. Часы ESP синхронизируются через SNTP;
+до получения времени шлюз возвращает 503 с предложением повторить запрос.
+Проверка сертификатов не отключается.
+
+Включена штатная поддержка перекрёстно подписанных цепочек CA
+(`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y`). Она нужна, в частности,
+для цепочки Google WE1 → GTS Root R4, которую могут передавать сайты за Cloudflare.
+Без неё IDF 6.x может отвергать корректную цепочку, даже если её корень есть в
+bundle. [Описание Espressif](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/api-reference/protocols/esp_crt_bundle.html#cross-signed-certificate-support).
+
+PSP получает страницы по HTTP. Радиоканал PSP↔ESP шифруется WPA1/TKIP;
+HTTPS между ESP и сайтом завершается на ESP, сквозного TLS до PSP здесь нет.
+Просроченные корни PSP при таком обращении не используются.
+
+Шлюз предназначен для **простых публичных страниц**:
+
+- GET и HEAD; upstream всегда HTTPS, включая запросы `http://` от PSP.
+- HTTPS-редиректы и буквальные `https://` в HTML/CSS/JavaScript заменяются на HTTP,
+  чтобы следующие обращения браузера тоже проходили через шлюз.
+- Ответы передаются потоком как HTTP/1.0 с закрытием соединения; chunked upstream
+  декодирует HTTP-клиент ESP. Запрашивается `Accept-Encoding: identity`.
+- Два одновременных запроса; заголовки запроса до 4 КиБ, URL до 2 КиБ, ответ до 4 МиБ,
+  цикл передачи до 60 с, отдельные сетевые операции ограничены таймаутами.
+  Крупные TLS-буферы могут размещаться в PSRAM.
+- POST, CONNECT, cookies/авторизация, преобразование изображений, современный JS,
+  CAPTCHA и видеосервисы не поддерживаются. Бинарные ответы не переписываются.
+- Ошибка сертификата/HTTPS даёт 502; автоматического обхода проверки или отката
+  на незашифрованный upstream нет. HTTP-only сайты открывайте без прокси.
+
+На PSP подтверждено открытие ya.ru, zond.am и pdaxrom.org. Современная вёрстка
+последних двух отображается некорректно: шлюз передаёт HTML/CSS, преобразование
+оформления для старого браузера не выполняется.
+
+CONNECT лишь передаёт TLS между PSP и сайтом и не исправляет старые сертификаты
+или несовместимые версии TLS, поэтому он не используется. В браузере вводите
+**http://**, например `http://example.com/`, даже если сайт работает по HTTPS.
+
+На `http://192.168.50.1:8080/` находится простая стартовая страница, поле адреса
+и последние замеры. Connection включает DNS/TCP/TLS, Total также включает
+передачу клиенту; это не отдельный бенчмарк криптографии.
+
+На проверенной ESP32-S3 три HTTPS-загрузки по 64 КиБ через USB заняли
+4,26–4,32 с каждая, включая 2,90–2,93 с установки соединения: около 15 КиБ/с
+за весь запрос. Это измерение с USB-компьютера; скорость браузера PSP и Wi-Fi
+пока не измерена. Условия и выполненные проверки — в [TEST_REPORT.md](TEST_REPORT.md).
+
+DNS relay и прокси принимают запросы только от Wi-Fi-подсети и USB-компьютера
+(его адрес определяется как DHCP gateway). Остальные источники отклоняются.
+На компьютере их можно проверить через WAN-адрес ESP без подключения к PSP-NET.
+
+## Плата и восстановление
+
+Flash: **4 МиБ QIO / 80 МГц**. PSRAM: **2 МиБ Quad SPI / 40 МГц**, не OPI.
+CPU в режиме router: **240 МГц**, аппаратные AES/SHA/RSA включены в IDF.
+ROM проверенной платы определил Flash XMC 4MB и PSRAM AP_3v3 2MB; приложение
+измерило 4194304/2097152 байт. Перед запуском AP эти физические размеры проверяются;
+при несовпадении AP не запускается. Название HW-747 само по себе комплектацию
+не гарантирует. Для другого чипа нужна отдельная конфигурация.
+
+Приложение не управляет GPIO0/BOOT, EN/RESET или eFuse. Secure Boot и Flash
+Encryption не включены. Native ROM download остаётся доступен через BOOT/RESET.
+В обычной прошивке USB используется только как сеть: COM/tty-консоли нет.
+
+## Зафиксированные зависимости и примеры
+
+| Зависимость | Проверенная версия |
 | --- | --- |
-| ESP-IDF | `v6.1-dev-4811-gfce70533fa` |
-| ESP-IDF commit | `fce70533fa1fdeef9f903ce5e87ff8d292be992b` |
-| `espressif/esp_tinyusb` | **`2.0.1~1`**, точная версия в manifest |
-| `espressif/tinyusb` | **`0.21.0~4`**, точная версия в manifest |
-| Xtensa GCC, проверенная среда | `15.2.0`, tool package `esp-15.2.0_20251204` |
-| Component Manager, проверенная среда | `3.0.2` |
+| ESP-IDF | v6.1-dev-4811-gfce70533fa |
+| IDF commit | fce70533fa1fdeef9f903ce5e87ff8d292be992b |
+| espressif/esp_tinyusb | 2.0.1~1 |
+| espressif/tinyusb | 0.21.0~4 |
+| Xtensa GCC | 15.2.0, esp-15.2.0_20251204 |
+| Python (сборка 2.0.1) | 3.15.2 |
+| Component Manager | 3.1.2 |
+| esp-idf-kconfig | 3.14.0 |
+| esptool | 5.6.0 |
 
-Хэши пакетов находятся в `dependencies.lock`; файл следует хранить вместе с
-исходниками. CMake проверяет commit IDF. Это зафиксированная **development**
-ревизия, а не заявление о совместимости со всеми ESP-IDF 6.x. Для исследования
-другой ревизии есть явный `-DPSP_ALLOW_UNTESTED_IDF=ON`; после него нужны повторные
-сборки и аппаратные проверки. Автоматическое обновление зависимостей не требуется.
+Manifest и registry-хэши — в `main/idf_component.yml` и `dependencies.lock`.
+HTTP-клиент, TLS, CA bundle, SNTP и NAPT входят в закреплённую ESP-IDF; новых
+внешних библиотек нет. CMake проверяет commit IDF. `PSP_ALLOW_UNTESTED_IDF=ON`
+разрешает другую ревизию только для исследования с повторной проверкой.
 
-Перед реализацией изучены исходники именно установленной ревизии:
+Использованы официальные исходники именно этой ревизии:
 
-- [ESP-IDF network/bridge](https://github.com/espressif/esp-idf/tree/fce70533fa1fdeef9f903ce5e87ff8d292be992b/examples/network/bridge)
-  — LwIP bridge, Wi-Fi AP как порт, отключение DHCP на физических портах и
-  ограничения жизненного цикла мостовых портов.
-- [ESP-IDF tusb_ncm](https://github.com/espressif/esp-idf/tree/fce70533fa1fdeef9f903ce5e87ff8d292be992b/examples/peripherals/usb/device/tusb_ncm)
-  — native USB, установка TinyUSB. Направление и сетевой класс примера отличаются
-  от этой прошивки; NCM здесь не используется.
-- [ESP-IDF softap_sta](https://github.com/espressif/esp-idf/tree/fce70533fa1fdeef9f903ce5e87ff8d292be992b/examples/wifi/softap_sta)
-  — изучен вариант NAPT до согласованного перехода на L2 bridge.
-- [TinyUSB net_lwip_webserver](https://github.com/hathach/tinyusb/tree/0.21.0/examples/device/net_lwip_webserver)
-  — дескрипторы ECM/RNDIS и сетевые callback.
+- [softap_sta / NAPT, DNS DHCP](https://github.com/espressif/esp-idf/tree/fce70533fa1fdeef9f903ce5e87ff8d292be992b/examples/wifi/softap_sta)
+- [esp_http_client](https://github.com/espressif/esp-idf/tree/fce70533fa1fdeef9f903ce5e87ff8d292be992b/examples/protocols/esp_http_client)
+- [network/bridge](https://github.com/espressif/esp-idf/tree/fce70533fa1fdeef9f903ce5e87ff8d292be992b/examples/network/bridge)
+- [tusb_ncm / установка native TinyUSB](https://github.com/espressif/esp-idf/tree/fce70533fa1fdeef9f903ce5e87ff8d292be992b/examples/peripherals/usb/device/tusb_ncm)
+- [TinyUSB net_lwip_webserver / ECM и RNDIS](https://github.com/hathach/tinyusb/tree/0.21.0/examples/device/net_lwip_webserver)
 - [Microsoft OS 2.0 descriptors](https://learn.microsoft.com/en-us/windows-hardware/drivers/usbcon/microsoft-os-2-0-descriptors-specification)
-  — BOS и привязка RNDIS к штатному драйверу Windows.
 
-`esp_tinyusb 2.0.1~1` предоставляет сетевую обёртку для NCM. Поэтому ECM/RNDIS
-подключён через callback TinyUSB и собственный Ethernet-драйвер `esp_netif`,
-с ограниченной очередью TX. Managed-компоненты не патчатся.
-
-## Плата, USB и память
-
-Native USB-C использует внутренний PHY: **GPIO19 = D−, GPIO20 = D+**.
-Программа не переназначает эти GPIO и не управляет BOOT/GPIO0, RESET/EN или eFuse.
-USB работает в device/full-speed режиме; питание поступает от того же кабеля.
-Не подключайте D± к другим устройствам.
-
-Параметры FH4R2: **4 МиБ Flash QIO, 80 МГц; 2 МиБ PSRAM Quad SPI, 40 МГц**.
-OPI/Octal PSRAM не используется. См.
-[данные Espressif о FH4R2](https://docs.espressif.com/projects/arduino-esp32/en/latest/guides/tools_menu.html#embedded-flash)
-и [аппаратное руководство](https://docs.espressif.com/projects/esp-hardware-design-guidelines/en/latest/esp32s3/schematic-checklist.html#flash-and-psram).
-
-Название HW-747 само по себе не подтверждает комплектацию конкретного экземпляра.
-Перед прошивкой прочитайте маркировку чипа и в ROM download mode выполните:
-
-```sh
-. "$HOME/Work/ESP/esp-idf/export.sh"
-python -m esptool --chip esp32s3 --port /dev/cu.usbmodemXXXX flash-id
-```
-
-Подставьте порт своей платы (`COMx` в Windows, `/dev/ttyACM0` в Linux).
-`flash-id` проверяет физическую Flash; PSRAM проверяется при загрузке прошивки.
-При загрузке используются `esp_flash_get_physical_size()` и
-`esp_psram_get_size()`, включён стартовый тест PSRAM. Если физические объёмы
-отличаются от 4 МиБ Flash / 2 МиБ PSRAM, AP не запускается. Для другой
-маркировки нужна отдельная конфигурация и проверка ожидаемых объёмов.
-Релиз не содержит USB-консоли и периодического диагностического вывода.
-**7 ноября 2026 проверен подключённый экземпляр:** ROM определил ESP32-S3 rev 0.2
-со встроенными Flash 4 МиБ и PSRAM 2 МиБ; рабочая прошивка подтвердила
-`Flash=4194304 PSRAM=2097152`. Результат относится к проверенной плате; остальные
-экземпляры HW-747 проверяйте тем же способом.
-
-Таблица разделов: NVS, PHY и factory app размером 3 МиБ; все разделы внутри 4 МиБ.
-OTA, Secure Boot и Flash Encryption не включены. Восстановление через ROM USB
-остаётся доступно, если оно не было ранее отключено eFuse самим владельцем.
+Managed-компоненты и установленная ESP-IDF не патчатся. EAPOL v1 для WPA1/TKIP
+задаётся linker-wrapper, собранным с тем же private ABI, что и wpa_supplicant.
 
 ## Сборка
 
-Из корня проекта, с указанной ESP-IDF:
-
 ```sh
 . "$HOME/Work/ESP/esp-idf/export.sh"
-git -C "$IDF_PATH" rev-parse HEAD
-sh tools/build.sh rndis
+sh tools/build.sh ecm                 # macOS/Linux, WPA1, router + proxy
+sh tools/build.sh rndis               # Windows, WPA1, router + proxy
+sh tools/build.sh ecm wpa1 bridge      # прежний прозрачный bridge
+sh tools/build.sh ecm open router     # явно открытая диагностическая сеть
 ```
 
-Первая сборка скачивает две зафиксированные зависимости из Espressif Component
-Registry. Результат: `build-rndis/psp_usb_router.bin`, bootloader и partition table.
-Скрипт также проверяет конфигурацию и USB-дескрипторы из готового ELF.
+Аргументы: `[rndis|ecm] [wpa1|open] [router|bridge]`.
+Каталоги отдельные: `build-ecm-router`, `build-rndis-router`,
+`build-ecm-bridge`, `build-ecm-open-router`. Профили ОС выбираются при сборке;
+автоматического переключения защиты нет. VID/PID прототипа: RNDIS 303a:4011,
+ECM 303a:4012. Перед распространением устройства нужна назначенная VID/PID-пара.
 
-| Хост и защита | Команда | Каталог |
-| --- | --- | --- |
-| Windows 10/11, WPA1/TKIP | `sh tools/build.sh rndis` | `build-rndis` |
-| macOS/Linux, WPA1/TKIP | `sh tools/build.sh ecm` | `build-ecm` |
-| Windows, явно открытая диагностика | `sh tools/build.sh rndis open` | `build-rndis-open` |
-| macOS/Linux, явно открытая диагностика | `sh tools/build.sh ecm open` | `build-ecm-open` |
-
-Оба класса выбираются **при сборке**. В одном образе одна USB-сетевая функция
-без CDC-ACM консоли; автоматического определения ОС нет. Разные PID позволяют
-ОС различать RNDIS (`303a:4011`) и ECM (`303a:4012`). VID/PID используются для
-локального прототипа; для выпуска устройства нужна собственная назначенная пара.
-
-Пароль по умолчанию **`psp3000wifi`**. Чтобы задать свой:
+Пароль по умолчанию **psp3000wifi**. Изменение:
 
 ```sh
-idf.py -B build-ecm -DSDKCONFIG=build-ecm/sdkconfig menuconfig
+idf.py -B build-ecm-router -DSDKCONFIG=build-ecm-router/sdkconfig menuconfig
 # PSP USB router → WPA1 passphrase
 sh tools/build.sh ecm
 ```
 
-Для Windows замените `build-ecm` на `build-rndis`. Допустимы 8–63 печатных ASCII
-символа. Пустой/неверный пароль останавливает AP; открытая сеть автоматически не
-включается. Не переключайте профиль ОС/защиты внутри существующего каталога:
-используйте соответствующую команду таблицы. Сборки имеют отдельные `sdkconfig`.
-
-Обычный `idf.py set-target esp32s3 && idf.py build` тоже использует
-`sdkconfig.defaults` (RNDIS/WPA1), но для переключения профилей удобнее скрипт.
-
-В Windows PowerShell с активированной средой ESP-IDF можно собирать без `sh`:
+Допустимы 8–63 печатных ASCII-символа. Неверный пароль останавливает AP.
+Другие параметры сети/прокси — в том же menuconfig.
+Профили ОС и архитектуры меняйте аргументами скрипта, чтобы сохранять отдельные
+конфигурации. В Windows PowerShell с активированной средой ESP-IDF:
 
 ```powershell
-idf.py -B build-rndis -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-rndis/sdkconfig build
-python tools/check_build.py build-rndis --profile rndis
+idf.py -B build-rndis-router -DIDF_TARGET=esp32s3 -DSDKCONFIG=build-rndis-router/sdkconfig build
+python tools/check_build.py build-rndis-router --profile rndis --mode router
 ```
 
-## Прошивка и BOOT/RESET
+## Прошивка
 
 1. Подключите native USB-C кабелем с передачей данных.
-2. Удерживайте **BOOT**, нажмите и отпустите **RESET**, затем отпустите BOOT.
-   Появится USB Serial/JTAG порт ROM-загрузчика.
-3. Прошейте выбранную сборку, например ECM:
+2. Зажмите BOOT, нажмите и отпустите RESET, затем отпустите BOOT.
+3. Прошейте нужную сборку (подставьте ROM-порт, COMx в Windows):
 
    ```sh
-   idf.py -B build-ecm -DSDKCONFIG=build-ecm/sdkconfig -p /dev/cu.usbmodemXXXX flash
+   idf.py -B build-ecm-router -DSDKCONFIG=build-ecm-router/sdkconfig \
+     -p /dev/cu.usbmodemXXXX flash
    ```
 
-4. Отпустив BOOT, нажмите RESET, если приложение не запустилось автоматически.
-   ROM-порт исчезнет: в релизе USB используется только как сетевая карта.
-   Отсутствие `/dev/cu.usbmodem...` / COM-порта после запуска ожидаемо.
+4. Если приложение не запустилось автоматически, нажмите RESET без BOOT.
+   ROM-порт исчезнет и появится USB-сеть; отсутствие последовательного порта ожидаемо.
 
-Готовые объединённые WPA1-образы находятся в `dist/psp-bridge-rndis-wpa1.bin` и
-`dist/psp-bridge-ecm-wpa1.bin`. Они включают bootloader, partition table и app,
-прошиваются **с адреса 0x0** в ROM download mode:
+Полный образ `dist/psp-router-ecm-wpa1.bin` записывается по **0x0**.
+Один `build-ecm-router/psp_usb_router.bin` — только приложение по **0x10000**.
+Полный объединённый образ перезаписывает и промежутки, включая NVS.
+Для обновления без стирания NVS используйте `idf.py flash`.
+Сохранённый рабочий bridge 1.0.0: `dist/psp-bridge-ecm-v1.0.0.bin`.
 
-```sh
-python -m esptool --chip esp32s3 --port /dev/cu.usbmodemXXXX \
-  write-flash 0x0 dist/psp-bridge-ecm-wpa1.bin
-```
+## Общий доступ компьютера
 
-Объединённый образ также перезаписывает промежутки между разделами, включая
-область NVS. Контрольные суммы — `dist/SHA256SUMS`. Для повторного создания образа:
-
-```sh
-mkdir -p dist
-idf.py -B build-ecm -DSDKCONFIG=build-ecm/sdkconfig \
-  merge-bin -o "$PWD/dist/psp-bridge-ecm-wpa1.bin"
-```
-
-Отдельный `build-ecm/psp_usb_router.bin` содержит только приложение и размещается
-по **0x10000**; команда `idf.py flash` сама берёт правильные адреса из сборки.
-
-Приложение не реализует переход в загрузчик по 1200 baud/DTR. Для следующей
-прошивки снова используйте BOOT/RESET: это работает и при ошибке приложения,
-неверном пароле или отсутствии PSRAM. Если порт не появился, удерживайте BOOT
-при подключении USB, затем отпустите; проверьте кабель и USB-порт. Официальная
-[последовательность Espressif](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s3/get-started/establish-serial-connection.html#flash-using-usb).
-
-## Общий доступ на компьютере
-
-Компьютер должен уже иметь работающий интернет через другой интерфейс. Выбирайте
-USB-адаптер ESP как **получателя** общего доступа. Компьютер выдаёт DHCP и PSP,
-и диагностическому интерфейсу ESP; статический адрес ESP не нужен.
+Компьютер должен иметь отдельное действующее подключение к интернету. USB-карта
+ESP — получатель общего доступа. В роутерном режиме DHCP компьютера выдаёт адрес
+только WAN ESP; адреса PSP выдаёт уже сам ESP.
 
 ### Windows 10/11 — RNDIS
 
-1. Прошейте `rndis`. В «Диспетчер устройств → Сетевые адаптеры» должен появиться
-   RNDIS/Remote NDIS adapter. COM-порт появляется только в ROM download mode.
-2. Прошивка предоставляет RNDIS class/IAD и Microsoft OS 2.0 Compatible ID для
-   штатного драйвера. Если автоматическая привязка не сработала, используйте
-   «Обновить драйвер → Найти на этом компьютере → Выбрать из списка → Сетевые
-   адаптеры → Microsoft → Remote NDIS Compatible Device», если такой драйвер
-   доступен в вашей Windows. Сторонний драйвер не нужен. Корпоративная политика
-   может запрещать RNDIS/ICS; фактическую работу нужно проверить на вашем хосте.
-3. `Win+R` → `ncpa.cpl`. У адаптера, через который работает интернет, откройте
-   «Свойства → Доступ». Включите «Разрешить другим пользователям сети использовать
-   подключение к Интернету данного компьютера» и выберите **USB RNDIS ESP**.
-4. Подтвердите изменения. Проверьте `ipconfig /all`: у USB-адаптера должен быть
-   частный IPv4-адрес ICS (часто `192.168.137.1`). Адрес PSP после подключения должен быть
-   из той же подсети. Не устанавливайте USB-адаптеру внешний default gateway.
-5. Если USB-адаптер был отключён или выбран другой профиль, снова проверьте
-   привязку общего доступа. Перезапуск ICS иногда требуется после изменения
-   внешнего подключения; прошивка продолжает передавать DHCP без перезагрузки.
+В диспетчере устройств должен появиться сетевой адаптер RNDIS/Remote NDIS.
+Используется штатный драйвер с Microsoft OS 2.0 Compatible ID. При необходимости:
+«Обновить драйвер → Выбрать из списка → Сетевые адаптеры → Microsoft → Remote NDIS
+Compatible Device». Сторонний драйвер не требуется, но привязка требует проверки
+на конкретной Windows.
 
-Модель службы описана в
-[Microsoft SharedAccess](https://learn.microsoft.com/en-us/windows-hardware/customize/desktop/unattend/microsoft-windows-sharedaccess).
+`Win+R` → `ncpa.cpl` → свойства действующего интернет-адаптера → «Доступ» →
+разрешить общий доступ и выбрать USB RNDIS ESP. Обычно USB-сеть ICS —
+192.168.137.0/24. Не назначайте USB-адаптеру внешний default gateway.
 
 ### macOS — CDC-ECM
 
-1. Прошейте `ecm`. В «Настройки системы → Сеть» появится USB Ethernet/ECM;
-   при необходимости добавьте обнаруженную Ethernet-службу. Штатный драйвер ECM
-   не требует HoRNDIS.
-2. «Настройки системы → Основные → Общий доступ → Общий интернет» / Internet
-   Sharing. Откройте параметры: источник — действующий Wi-Fi/Ethernet,
-   получатель («Для компьютеров, использующих») — **USB Ethernet ESP**.
-3. Включите общий интернет. Не выбирайте Wi-Fi получателем: точку создаёт ESP.
-4. Проверьте `networksetup -listallhardwareports` и `ifconfig`: служба общего
-   доступа может использовать `bridge100`, адреса определяет macOS. PSP должна
-   получить IP/шлюз/DNS из этой сети.
+«Настройки системы → Сеть»: PSP Router ECM/USB Ethernet, штатный драйвер.
+«Основные → Общий доступ → Общий интернет»: источник — действующий интернет,
+получатель — **USB Ethernet ESP**. Wi-Fi получателем не выбирайте, AP создаёт ESP.
 
-Порядок меню зависит от версии macOS; см.
-[инструкцию Apple](https://support.apple.com/guide/mac-help/share-internet-connection-mac-network-users-mchlp1540/mac).
-Обычное назначение USB-адаптеру DHCP-клиента без включения Internet Sharing не
-раздаёт адреса PSP. Службы content caching/tethered caching не заменяют этот режим.
+В этой системе используется `bridge100` с адресом 192.168.2.1, участник en13.
+Link-local 169.254.x.x на en13 сам по себе не является ошибкой.
+В macOS 27 обычный ifconfig может скрывать MAC как 02:00:00:00:00:00;
+`sudo ifconfig en13` показывает реальный адрес. [Подтверждение Apple](https://developer.apple.com/forums/thread/841958).
 
-### Ubuntu / NetworkManager — CDC-ECM
+### Ubuntu / NetworkManager — ECM
 
-Найдите интерфейс устройства, затем создайте профиль общего доступа:
+Выберите обнаруженный USB Ethernet, создайте отдельное подключение с
+`ipv4.method shared`, сохранив внешний интернет-интерфейс:
 
 ```sh
 nmcli device status
-ip -br link
-# Замените enxXXXXXXXXXXXX на интерфейс USB ECM ESP:
-sudo nmcli connection add type ethernet ifname enxXXXXXXXXXXXX \
-  con-name PSP-USB ipv4.method shared ipv6.method disabled
-sudo nmcli connection up PSP-USB
-nmcli -f GENERAL,IP4 device show enxXXXXXXXXXXXX
+sudo nmcli connection add type ethernet ifname enxXXXXXXXXXXXX con-name psp-usb \
+  ipv4.method shared ipv6.method disabled
+sudo nmcli connection up psp-usb
 ```
 
-Если интерфейс уже занят автоматическим профилем, отключите именно тот профиль
-либо измените его `ipv4.method` на `shared`. В GUI это «IPv4 → Shared to other
-computers / Общий с другими компьютерами». NetworkManager запускает DHCP/DNS и
-маскарадинг, обычно используя `10.42.x.1/24`; см.
-[документацию `ipv4.method=shared`](https://networkmanager.dev/docs/api/latest/settings-ipv4.html).
-Внешнее подключение компьютера должно сохранять default route.
+Подставьте свой USB-интерфейс. NetworkManager выдаст WAN ESP адрес своей подсети.
 
-Для анализа DHCP и прозрачности MAC:
+## Подключение PSP
 
-```sh
-sudo tcpdump -eni enxXXXXXXXXXXXX 'arp or (udp port 67 or 68) or port 53'
-```
+**ARK-5: выключите WPA2 Support в настройках CFW.** На проверенной PSP именно
+включённый WPA2 вызывал циклический обмен ключами и таймаут при WPA1/TKIP.
+После отключения прежний релиз успешно работал.
 
-В кадрах от PSP должен сохраняться её исходный MAC. DHCP Offer/ACK поступает от
-компьютера; в настройках PSP нет отдельной «ESP-подсети». Linux также умеет RNDIS,
-но базовый профиль для macOS/Linux здесь ECM.
+1. Включите WLAN, Infrastructure Mode → Scan → **PSP-NET**.
+2. Выберите **WPA-PSK (TKIP)**, пароль **psp3000wifi**.
+3. IP и DNS — Automatic, для прямого NAT-доступа Proxy — Do Not Use.
+4. В режиме router ожидается IP 192.168.50.x, шлюз/DNS 192.168.50.1.
+5. Для браузерного шлюза отредактируйте это подключение: Proxy → Use,
+   Address **192.168.50.1**, Port **8080**. При смене LAN используйте новый шлюз PSP.
+6. Откройте **http://192.168.50.1:8080/**, затем **http://httpbingo.org/html**.
+   Не вводите https:// в адресной строке: такой запрос потребует старого TLS PSP.
 
-## Подключение PSP-3000
+Можно сохранить два соединения с одним SSID: одно без прокси, второе с прокси.
 
-**ARK-5:** выключите **WPA2 Support** в настройках CFW перед подключением к
-этой WPA1/TKIP-сети. На проверенной PSP именно включённый WPA2 вызывал
-циклический обмен ключами и таймаут; после отключения подключение работает.
-
-1. Включите физический переключатель WLAN на PSP.
-2. Settings → Network Settings → **Infrastructure Mode** → New Connection → Scan.
-3. Выберите видимую **PSP-NET**. Параметры AP фиксированы: 2,4 ГГц, **только
-   802.11b**, канал **6**, beacon 100 TU, до четырёх клиентов.
-4. Защита — **WPA-PSK (TKIP)**, пароль `psp3000wifi` либо ваш из menuconfig.
-   Прошивка устанавливает именно `WIFI_AUTH_WPA_PSK` и `WIFI_CIPHER_TYPE_TKIP`,
-   проверяет чтением обратно и не заменяет их WPA2/WPA3. PMF не требуется.
-   Для WPA1 заголовок EAPOL передаётся с версией 1; descriptor version TKIP
-   остаётся 1. Это не отключает проверку MIC и не меняет пароль.
-5. Address Settings → Easy либо Custom с IP Automatic, DNS Automatic,
-   Proxy Do Not Use. Сохраните и выполните Test Connection.
-6. Проверьте, что IP/DNS получены из сети общего доступа компьютера. Откройте
-   простой сайт по HTTP, который вы знаете как работающий.
-
-В явной сборке `open` на шаге 4 выбирайте **None**. Возвращение к WPA1 требует
-прошивки WPA1-сборки; BOOT и ошибки подключения режим защиты не переключают.
-WPA1/TKIP — устаревшая защита, выбранная ради совместимости PSP.
-Официальные [настройки PSP](https://manuals.playstation.net/document/en/psp/current/settings/details.html)
-перечисляют TKIP и автоматическое получение IP/DNS.
-
-Чтобы отделить Wi-Fi/bridge от внешнего интернета, можно на компьютере запустить
-HTTP-сервер **в отдельном каталоге с тестовой страницей** (`python3 -m http.server
-8000`) и открыть на PSP `http://<USB-адрес-компьютера>:8000/`. Разрешите входящий
-TCP 8000 для теста в локальном firewall. Это проверяет локальный путь, но не DNS
-и не выход в интернет. Успешная загрузка по IP и неуспех по имени указывает на
-проблему DNS/общего доступа. Современные HTTPS/TLS и недоступные старые сервисы
-PSP могут не работать при исправном bridge; браузерная ошибка сама по себе не
-доказывает сетевую неисправность.
-
-## Отключения и восстановление
-
-- Потеря внешнего интернета при сохранении USB не перезапускает ESP и не меняет
-  защиту AP. После восстановления компьютером общего доступа новые соединения
-  снова проходят. Прерванные TCP-сеансы приложениям нужно открыть заново.
-- USB reset, unmount и suspend прекращают приём кадров и изменяют номер сеанса
-  USB. Управляющий цикл каждые 100 мс меняет link/up состояния USB-порта и br0;
-  DHCP-клиент br0 запускается заново при подключении.
-- Объекты сетевых портов сохраняются весь срок работы: остановка/пересоздание
-  одного порта нарушает ссылки FDB моста в текущем lwIP. При reset не вызывается
-  `esp_netif_action_stop()` и не добавляются повторно те же порты.
-- TX не блокирует TCP/IP или USB-задачу: очередь максимум 12 копий кадров,
-  переполнение приводит к отбрасыванию. Отправка выполняется в задаче TinyUSB
-  по SOF; кадры старше 500 мс и кадры другого USB-сеанса отбрасываются.
-- ECM-передача дополнительно разрешается только после успешного `SET_INTERFACE`
-  с alternate setting 1. Это закрывает сохранение `can_xmit` в TinyUSB при reset
-  и отключении data interface; исходники зависимости не изменяются.
-- Если новый DHCP-адрес br0 показывает изменение подсети/шлюза компьютера,
-  клиенты Wi-Fi деаутентифицируются для обновления аренды. PSP может потребовать
-  повторно выбрать сохранённое соединение. При неизменной подсети AP не сбрасывается.
-- При физическом отключении единственного кабеля плата теряет питание. Повторное
-  подключение — обычная холодная загрузка; сохранение питания без USB не требуется.
-
-## Проверки
-
-**На проверенной PSP с ARK-5 необходимо выключить WPA2 Support в настройках
-CFW**, затем подключаться как WPA-PSK (TKIP). Пользователь подтвердил успешное
-подключение после отключения WPA2; Mac выдал PSP адрес `192.168.2.5`, исходный
-MAC PSP сохранился в ARP на `bridge100`. С включённым WPA2 возникал циклический
-обмен ключами и таймаут. Патч ARK [меняет EAPOL на RSN/WPA2](https://github.com/PSP-Archive/ARK-4/blob/main/core/compat/psp/wpa2.c).
-
-Релиз собран без WPA-трассировки, сниффера, самопроверки HMAC, USB-консоли,
-периодического вывода и принудительных 1 Мбит/с. Скорость выбирается драйвером
-в пределах 802.11b. BOOT/RESET и проверка физической памяти сохранены.
-Подробная матрица выполненных проверок — в `TEST_REPORT.md`.
-
-В macOS 27 непривилегированное приложение может получать подставной MAC
-`02:00:00:00:00:00`. [Apple подтверждает ограничение](https://developer.apple.com/forums/thread/841958).
-На проверенном Mac `sudo ifconfig en13` показывает фактический адрес
-`d2:cf:13:30:15:cd`. При Internet Sharing адрес сети раздачи находится на
-`bridge100` (`192.168.2.1` в этом прогоне), участник `en13` может иметь link-local
-адрес `169.254.x.x`.
+## Проверки и отключения
 
 ```sh
 sh tools/test_host.sh
-python tools/check_build.py build-rndis --profile rndis
-python tools/check_build.py build-ecm --profile ecm
+python tools/check_build.py build-ecm-router --profile ecm --mode router
+python tools/check_build.py build-ecm-bridge --profile ecm --mode bridge
+python tools/test_router_live.py WAN_IP_ESP --report dist/router-live.json
 ```
 
-`test_host.sh` проверяет границы пароля и недопустимость отправки кадров прошлого
-USB-сеанса/истёкшего срока с AddressSanitizer и UBSan. Второй тест с настоящими
-заголовками зафиксированного TinyUSB проверяет запрет ECM TX после reset/alt 0 и
-разрешение после успешного alt 1; аппаратные функции драйвера в нём заменены stub.
-`check_build.py` проверяет
-настройки и **байты дескрипторов из связанного ELF**, включая endpoint/interface,
-ECM alternate settings и RNDIS MS OS 2.0. Эти проверки не эмулируют драйвер Windows,
-радиоканал и PSP. Выполненные проверки и аппаратная матрица — в `TEST_REPORT.md`.
+Проверяются границы пароля/USB-кадров, пересечения CIDR, HTTP/URL-парсер,
+отклонение неоднозначных запросов, переписывание ссылок на всех границах буфера,
+готовность ECM после reset/alt 0/alt 1. Проверка ELF читает реальные USB-дескрипторы,
+выбранный сетевой режим, CA bundle и отсутствие отладочных функций.
 
-## Структура
+USB reset/suspend меняет номер сеанса, отбрасывает старые кадры и останавливает
+WAN DHCP. AP/LAN остаётся доступен. При изменении WAN NAPT-таблица очищается,
+активные запросы шлюза завершаются с ограниченным таймаутом; новые идут через
+актуальный адрес/DNS. Старые TCP-сеансы могут закрыться. При физическом извлечении
+единственного USB-кабеля плата теряет питание.
 
-- `main/main.c` — проверка памяти, WPA1/AP, создание lwIP bridge и состояния линка.
-- `main/usb_net.c` — Ethernet-драйвер esp-netif, USB callback и ограниченная TX-очередь.
-- `main/usb_descriptors.c` — RNDIS/ECM, BOS/MS OS 2.0, разные MAC хоста/моста.
-- `main/usb_ecm_guard.c` — контроль готовности ECM data interface при повторном USB reset.
-- `main/bridge_policy.c` — проверка пароля и срока/принадлежности кадров сеансу.
-- `main/wpa_compat.c` — EAPOL v1 для WPA1/TKIP без изменения ключей и MIC.
-- `sdkconfig.defaults`, `sdkconfig.ecm`, `sdkconfig.open` — воспроизводимые профили.
-- `main/idf_component.yml`, `dependencies.lock` — версии и хэши USB-компонентов.
+DNS relay поддерживает UDP-пакеты до 1232 байт; DNS-over-TCP не реализован.
+Выполненные аппаратные проверки, замеры и оставшиеся тесты — в [TEST_REPORT.md](TEST_REPORT.md).

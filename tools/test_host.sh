@@ -6,6 +6,9 @@ trap 'rm -f "$test_binary"' EXIT HUP INT TERM
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
     -I main main/bridge_policy.c tests/test_bridge_policy.c -o "$test_binary"
 "$test_binary"
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+    -I main main/router_policy.c main/proxy_protocol.c tests/test_router_proxy.c -o "$test_binary"
+"$test_binary"
 if [ ! -d managed_components/espressif__tinyusb/src ]; then
     printf '%s\n' 'Run sh tools/build.sh ecm first to download the pinned TinyUSB headers.' >&2
     exit 1

@@ -7,4 +7,4 @@ if(NOT PSP_IDF_COMMIT STREQUAL PSP_TESTED_IDF_COMMIT AND NOT PSP_ALLOW_UNTESTED_
     message(FATAL_ERROR "Use ESP-IDF ${PSP_TESTED_IDF_COMMIT}; see README.md. Override: -DPSP_ALLOW_UNTESTED_IDF=ON")
 endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(psp_usb_router VERSION 1.0.0)
+project(psp_usb_router VERSION 2.0.1)

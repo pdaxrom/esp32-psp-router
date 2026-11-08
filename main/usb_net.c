@@ -167,11 +167,19 @@ esp_netif_t *usb_net_create(const uint8_t bridge_mac[6])
     s_tx_queue = xQueueCreate(TX_QUEUE_LEN, sizeof(tx_packet_t *));
     ESP_ERROR_CHECK(s_tx_queue ? ESP_OK : ESP_ERR_NO_MEM);
     esp_netif_inherent_config_t base = ESP_NETIF_INHERENT_DEFAULT_ETH();
-    base.flags = 0; /* Bridge ports carry no IP address or DHCP client/server. */
+#if CONFIG_PSP_MODE_BRIDGE
+    base.flags = 0;
+    base.ip_info = NULL; /* Bridge ports carry no IP. */
+#else
+    base.route_prio = 100; /* USB WAN DHCP client, preferred over the AP. */
+#endif
     base.if_key = "USB_PORT";
     base.if_desc = "usb";
-    base.ip_info = NULL;
     memcpy(base.mac, bridge_mac, 6);
+#if CONFIG_PSP_MODE_ROUTER
+    ESP_ERROR_CHECK(esp_derive_local_mac(base.mac, bridge_mac));
+    base.mac[5] ^= 0x40; /* Distinct from AP and host NIC; host MAC stays stable. */
+#endif
     const esp_netif_driver_ifconfig_t driver = {
         .handle = &s_port, /* esp-netif requires a non-NULL IO driver handle at start. */
         .transmit = transmit,

@@ -1,4 +1,24 @@
 menu "PSP USB router"
+    choice PSP_NETWORK_MODE
+        prompt "Network architecture"
+        default PSP_MODE_ROUTER
+        config PSP_MODE_ROUTER
+            bool "USB WAN + Wi-Fi LAN, IPv4 NAPT and browser gateway"
+        config PSP_MODE_BRIDGE
+            bool "Transparent USB/Wi-Fi bridge (previous firmware)"
+    endchoice
+
+    config PSP_HTTP_PROXY
+        bool "PSP HTTP to HTTPS browser gateway"
+        depends on PSP_MODE_ROUTER
+        default y
+
+    config PSP_PROXY_PORT
+        int "Browser proxy TCP port"
+        depends on PSP_HTTP_PROXY
+        range 1024 65535
+        default 8080
+
     choice PSP_USB_PROFILE
         prompt "USB host operating system"
         default PSP_USB_RNDIS

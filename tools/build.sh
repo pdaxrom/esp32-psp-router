@@ -5,13 +5,17 @@ set -eu
 cd "$(dirname "$0")/.."
 profile=${1:-rndis}
 security=${2:-wpa1}
-case "$profile" in rndis|ecm) ;; *) printf '%s\n' 'Usage: sh tools/build.sh [rndis|ecm] [wpa1|open]' >&2; exit 2;; esac
-case "$security" in wpa1|open) ;; *) printf '%s\n' 'Usage: sh tools/build.sh [rndis|ecm] [wpa1|open]' >&2; exit 2;; esac
+mode=${3:-router}
+case "$profile" in rndis|ecm) ;; *) printf '%s\n' 'Usage: sh tools/build.sh [rndis|ecm] [wpa1|open] [router|bridge]' >&2; exit 2;; esac
+case "$security" in wpa1|open) ;; *) printf '%s\n' 'Usage: sh tools/build.sh [rndis|ecm] [wpa1|open] [router|bridge]' >&2; exit 2;; esac
+case "$mode" in router|bridge) ;; *) printf '%s\n' 'Mode must be router or bridge' >&2; exit 2;; esac
 defaults=sdkconfig.defaults
 if [ "$profile" = ecm ]; then defaults="$defaults;sdkconfig.ecm"; fi
 if [ "$security" = open ]; then defaults="$defaults;sdkconfig.open"; fi
+if [ "$mode" = bridge ]; then defaults="$defaults;sdkconfig.bridge"; fi
 build_dir="build-$profile"
 if [ "$security" = open ]; then build_dir="$build_dir-open"; fi
+build_dir="$build_dir-$mode"
 idf.py -B "$build_dir" -DIDF_TARGET=esp32s3 \
     -DSDKCONFIG="$build_dir/sdkconfig" -DSDKCONFIG_DEFAULTS="$defaults" build
-python tools/check_build.py "$build_dir" --profile "$profile" --security "$security"
+python tools/check_build.py "$build_dir" --profile "$profile" --security "$security" --mode "$mode"

@@ -1,6 +1,4 @@
-/* Native USB Ethernet <-> 802.11b SoftAP, based on ESP-IDF network/bridge.
- * The computer supplies DHCP/DNS/NAT. No L3 forwarding or DHCP server here.
- */
+/* USB WAN / PSP Wi-Fi LAN, with the previous transparent bridge as an option. */
 #include <inttypes.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -19,10 +17,17 @@
 #include "nvs_flash.h"
 #include "usb_net.h"
 #include "bridge_policy.h"
+#include "lwip/def.h"
+#include "router_network.h"
+#include "router_dns.h"
+#include "browser_proxy.h"
 
 static const char *TAG = "psp_bridge";
 static EventGroupHandle_t s_events;
-static esp_netif_t *s_bridge, *s_usb, *s_ap;
+static esp_netif_t *s_usb, *s_ap;
+#if CONFIG_PSP_MODE_BRIDGE
+static esp_netif_t *s_bridge;
+#endif
 #define AP_STARTED BIT0
 
 static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -40,7 +45,9 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
             const wifi_event_ap_wrong_password_t *e = data;
             ESP_LOGW(TAG, "WPA MIC verification failed for " MACSTR, MAC2STR(e->mac));
         }
-    } else if (base == IP_EVENT && id == IP_EVENT_ETH_GOT_IP) {
+    }
+#if CONFIG_PSP_MODE_BRIDGE
+    else if (base == IP_EVENT && id == IP_EVENT_ETH_GOT_IP) {
         const ip_event_got_ip_t *e = data;
         if (e->esp_netif == s_bridge) {
             static esp_netif_ip_info_t previous;
@@ -56,6 +63,7 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
                      IP2STR(&e->ip_info.ip), IP2STR(&e->ip_info.netmask), IP2STR(&e->ip_info.gw));
         }
     }
+#endif
 }
 
 static void init_wifi(void)
@@ -106,19 +114,29 @@ static void init_wifi(void)
     ESP_ERROR_CHECK(correct ? ESP_OK : ESP_ERR_INVALID_STATE);
 
     esp_netif_inherent_config_t ap = ESP_NETIF_INHERENT_DEFAULT_WIFI_AP();
+#if CONFIG_PSP_MODE_BRIDGE
     ap.flags = ESP_NETIF_FLAG_AUTOUP;
     ap.ip_info = NULL; /* No AP DHCP server, no 192.168.4.1 fallback. */
+#else
+    static const esp_netif_ip_info_t initial_lan = {
+        .ip.addr = PP_HTONL(0xc0a83201), .gw.addr = PP_HTONL(0xc0a83201),
+        .netmask.addr = PP_HTONL(0xffffff00),
+    };
+    ap.ip_info = &initial_lan;
+#endif
     s_ap = esp_netif_create_wifi(WIFI_IF_AP, &ap);
     ESP_ERROR_CHECK(s_ap ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(esp_wifi_set_default_wifi_ap_handlers());
 }
 
+#if CONFIG_PSP_MODE_BRIDGE
 static esp_err_t add_bridge_ports(void *ctx)
 {
     /* Called in TCP/IP context before either port accepts user traffic. */
     esp_err_t ret = esp_netif_bridge_add_port(s_bridge, s_usb);
     return ret == ESP_OK ? esp_netif_bridge_add_port(s_bridge, s_ap) : ret;
 }
+#endif
 
 void app_main(void)
 {
@@ -159,6 +177,7 @@ void app_main(void)
     init_wifi();
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, event_handler, NULL));
+#if CONFIG_PSP_MODE_BRIDGE
     bridgeif_config_t bridge_info = {
         .max_fdb_dyn_entries = 16,
         .max_fdb_sta_entries = 2,
@@ -173,13 +192,24 @@ void app_main(void)
     };
     s_bridge = esp_netif_new(&bridge_config);
     ESP_ERROR_CHECK(s_bridge ? ESP_OK : ESP_ERR_NO_MEM);
+#endif
     ESP_LOGI(TAG, "Starting bridge ports");
     esp_netif_action_start(s_usb, NULL, 0, NULL);
+#if CONFIG_PSP_MODE_BRIDGE
     esp_netif_action_start(s_bridge, NULL, 0, NULL);
+#endif
     ESP_ERROR_CHECK(esp_wifi_start());
     EventBits_t bits = xEventGroupWaitBits(s_events, AP_STARTED, pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
     ESP_ERROR_CHECK((bits & AP_STARTED) ? ESP_OK : ESP_ERR_TIMEOUT);
+#if CONFIG_PSP_MODE_BRIDGE
     ESP_ERROR_CHECK(esp_netif_tcpip_exec(add_bridge_ports, NULL));
+#else
+    router_network_init(s_usb, s_ap);
+    router_dns_start();
+#if CONFIG_PSP_HTTP_PROXY
+    browser_proxy_start();
+#endif
+#endif
 
     bool link_up = false;
     uint32_t previous_epoch = 0;
@@ -187,7 +217,11 @@ void app_main(void)
         usb_net_status_t usb = usb_net_status();
         if (link_up && (!usb.active || usb.epoch != previous_epoch)) {
             usb_net_accept_rx(false);
+#if CONFIG_PSP_MODE_ROUTER
+            router_network_poll(false);
+#else
             esp_netif_action_disconnected(s_bridge, NULL, 0, NULL);
+#endif
             esp_netif_action_disconnected(s_usb, NULL, 0, NULL);
             link_up = false;
             ESP_LOGI(TAG, "USB link down/reset: bridge DHCP stopped; AP stays available");
@@ -195,11 +229,16 @@ void app_main(void)
         if (!link_up && usb.active) {
             esp_netif_action_connected(s_usb, NULL, 0, NULL);
             usb_net_accept_rx(true);
+#if CONFIG_PSP_MODE_BRIDGE
             esp_netif_action_connected(s_bridge, NULL, 0, NULL);
+#endif
             link_up = true;
             ESP_LOGI(TAG, "USB link up: forwarding enabled, bridge management DHCP started");
         }
         previous_epoch = usb.epoch;
+#if CONFIG_PSP_MODE_ROUTER
+        router_network_poll(link_up);
+#endif
         /* Never stop/recreate a bridge port on USB resets: lwIP's FDB retains
          * netif pointers and has no remove-port API. Only change link/up state.
          */

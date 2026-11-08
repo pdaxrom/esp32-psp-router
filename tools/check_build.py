@@ -24,6 +24,7 @@ def main():
     parser.add_argument("build", type=Path)
     parser.add_argument("--profile", choices=["rndis", "ecm"], required=True)
     parser.add_argument("--security", choices=["wpa1", "open"], default="wpa1")
+    parser.add_argument("--mode", choices=["router", "bridge"], default="router")
     args = parser.parse_args()
     build = args.build.resolve()
     project = json.loads((build / "project_description.json").read_text())
@@ -33,7 +34,7 @@ def main():
         'CONFIG_ESPTOOLPY_FLASHSIZE="4MB"',
         "CONFIG_ESPTOOLPY_FLASHMODE_QIO=y",
         "CONFIG_SPIRAM_MODE_QUAD=y", "CONFIG_SPIRAM_SPEED_40M=y",
-        "CONFIG_SPIRAM_MEMTEST=y", "CONFIG_ESP_NETIF_BRIDGE_EN=y",
+        "CONFIG_SPIRAM_MEMTEST=y",
         "CONFIG_LWIP_NUM_NETIF_CLIENT_DATA=1", "CONFIG_LWIP_L2_TO_L3_COPY=y",
         "CONFIG_TINYUSB_NET_MODE_ECM_RNDIS=y", "# CONFIG_TINYUSB_CDC_ENABLED is not set",
         "CONFIG_ESP_CONSOLE_NONE=y", "CONFIG_LOG_DEFAULT_LEVEL_NONE=y",
@@ -41,7 +42,16 @@ def main():
         "CONFIG_COMPILER_OPTIMIZATION_SIZE=y",
         f"CONFIG_PSP_USB_{args.profile.upper()}=y",
         f"CONFIG_PSP_AP_{args.security.upper()}=y",
+        f"CONFIG_PSP_MODE_{args.mode.upper()}=y",
     ]
+    proxy_enabled = "CONFIG_PSP_HTTP_PROXY=y" in config.splitlines()
+    required += (["CONFIG_LWIP_IP_FORWARD=y", "CONFIG_LWIP_IPV4_NAPT=y", "CONFIG_LWIP_DHCPS=y",
+                  "CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240"] if args.mode == "router"
+                 else ["CONFIG_ESP_NETIF_BRIDGE_EN=y"])
+    if proxy_enabled:
+        required += ["CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y", "CONFIG_MBEDTLS_HAVE_TIME_DATE=y",
+                     "CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y",
+                     "CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y"]
     for setting in required:
         assert setting in config.splitlines(), f"Missing setting: {setting}"
     commands = json.loads((build / "compile_commands.json").read_text())
@@ -51,9 +61,9 @@ def main():
         assert "esp-idf/wpa_supplicant/" in command["command"]
         wpa_defines.append({s for s in shlex.split(command["command"]) if s.startswith("-D")})
     assert wpa_defines[0] == wpa_defines[1], "WPA compatibility wrapper ABI differs from authenticator"
-    for setting in ["CONFIG_LWIP_IP_FORWARD=y", "CONFIG_LWIP_IPV4_NAPT=y",
-                    "CONFIG_SECURE_BOOT=y", "CONFIG_SECURE_FLASH_ENC_ENABLED=y",
-                    "CONFIG_ESP_CONSOLE_USB_CDC=y", "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y"]:
+    for setting in ["CONFIG_SECURE_BOOT=y", "CONFIG_SECURE_FLASH_ENC_ENABLED=y",
+                    "CONFIG_ESP_CONSOLE_USB_CDC=y", "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y",
+                    "CONFIG_ESP_TLS_INSECURE=y", "CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y"]:
         assert setting not in config.splitlines(), f"Unexpected setting: {setting}"
     with (build / "psp_usb_router.elf").open("rb") as stream:
         elf = ELFFile(stream)
@@ -94,7 +104,15 @@ def main():
             assert ms[30:38] == b"RNDIS\0\0\0" and ms[38:] == b"5162001\0"
             bos = read_symbol("bos_descriptor")
             assert len(bos) == 33 and bos[-2] == 0x20
-        assert "bridgeif_add_port" in symbols and "ip_napt_enable_netif" not in symbols
+        if args.mode == "bridge":
+            assert "bridgeif_add_port" in symbols and "ip_napt_enable_netif" not in symbols
+            assert "browser_proxy_start" not in symbols
+        else:
+            assert "bridgeif_add_port" not in symbols and "ip_napt_enable_netif" in symbols
+            assert "router_dns_start" in symbols
+            assert ("browser_proxy_start" in symbols) == proxy_enabled
+            if proxy_enabled:
+                assert "esp_crt_bundle_attach" in symbols
         assert "__wrap_wpa_init" in symbols
         for name in ["__wrap_wpa_receive", "__wrap_hostapd_send_eapol", "__wrap_esp_wifi_internal_tx",
                      "router_console_poll", "wifi_trace_start", "usb_diag_start", "cdcd_open"]:
@@ -102,7 +120,7 @@ def main():
     link_map = (build / "psp_usb_router.map").read_text()
     init_refs = link_map.split("\n__wrap_wpa_init ", 1)[1].split("\n", 2)[:2]
     assert "esp_hostap.c.obj" in "\n".join(init_refs), "Authenticator initialization bypasses compatibility wrapper"
-    print(f"PASS: {args.profile}/{args.security}: target, memory/recovery config, ELF USB descriptors, L2 bridge")
+    print(f"PASS: {args.profile}/{args.security}/{args.mode}: target, memory/recovery, USB descriptors, network mode")
 
 
 if __name__ == "__main__":
