@@ -153,15 +153,50 @@ Managed-компоненты и установленная ESP-IDF не патч
 sh tools/build.sh ecm                 # macOS/Linux, WPA2/AES, router + proxy
 sh tools/build.sh rndis               # Windows, WPA2/AES, router + proxy
 sh tools/build.sh ecm wpa1 router      # WPA1/TKIP для PSP без WPA2-патча
-sh tools/build.sh ecm wpa1 bridge      # прежний прозрачный bridge
+sh tools/build.sh ecm wpa1 bridge      # прозрачный bridge, WPA1/TKIP
+sh tools/build.sh ecm wpa2 bridge      # прозрачный bridge, WPA2/AES для ARK-5
 sh tools/build.sh ecm open router     # явно открытая диагностическая сеть
 ```
 
 Аргументы: `[rndis|ecm] [wpa2|wpa1|open] [router|bridge]`.
 Каталоги отдельные: `build-ecm-wpa2-router`, `build-rndis-wpa2-router`,
-`build-ecm-wpa1-router`, `build-ecm-wpa1-bridge`, `build-ecm-open-router`. Профили ОС выбираются при сборке;
+`build-ecm-wpa1-router`, `build-ecm-wpa1-bridge`, `build-ecm-wpa2-bridge`,
+`build-ecm-open-router`. Профили ОС выбираются при сборке;
 автоматического переключения защиты нет. VID/PID прототипа: RNDIS 303a:4011,
 ECM 303a:4012. Перед распространением устройства нужна назначенная VID/PID-пара.
+
+### Bridge: выбор WPA1 или WPA2
+
+В прозрачном мосте защита выбирается вторым аргументом, архитектура — третьим:
+
+```sh
+sh tools/build.sh ecm wpa1 bridge      # macOS/Linux, WPA-PSK / TKIP
+sh tools/build.sh ecm wpa2 bridge      # macOS/Linux, WPA2-PSK / AES-CCMP
+sh tools/build.sh rndis wpa1 bridge    # Windows, WPA-PSK / TKIP
+sh tools/build.sh rndis wpa2 bridge    # Windows, WPA2-PSK / AES-CCMP
+```
+
+Сборки находятся в отдельных каталогах `build-<usb>-<security>-bridge`.
+WPA1 использует EAPOL v1, WPA2 — штатный EAPOL v2. SSID **PSP-NET** и пароль
+**psp3000wifi** одинаковы; автоматического переключения защиты нет.
+В `menuconfig` этот же выбор доступен в **PSP USB router → Wi-Fi security**.
+
+Для WPA2 на PSP нужны включённый **WPA2 Support** в ARK-5 и профиль **AES**;
+для WPA1 — выключенный WPA2 Support и профиль **TKIP**. После изменения
+WPA2 Support полностью перезапустите PSP. IP/DNS оставьте автоматическими,
+proxy — **Do Not Use**: в bridge адреса выдаёт компьютер в одной подсети,
+а HTTP→HTTPS шлюз доступен только в режиме router.
+
+Готовые bridge-образы имеют отдельные имена
+`dist/psp-bridge-<usb>-<security>-v2.1.3.bin` и записываются по **0x0**.
+Контрольные суммы — `dist/BRIDGE_WPA_SHA256SUMS`, состав вариантов —
+`dist/bridge-v2.1.3-manifest.json`.
+ECM/WPA2 bridge проверен на PSP: DHCP компьютера, локальный и внешний HTTP,
+а также свежий HTTP-запрос после переподключения USB. RNDIS bridge пока проверен
+только сборкой. Проверки router и bridge описаны раздельно.
+[Отдельная аппаратная проверка bridge/WPA2](docs/TEST_REPORT_BRIDGE_WPA2.md).
+
+### Пароль и другие настройки
 
 Пароль по умолчанию **psp3000wifi**. Изменение:
 

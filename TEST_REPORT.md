@@ -48,6 +48,20 @@ Flash Encryption не менялись. USB — только сеть, без CD
 | ECM / OPEN / router | PASS, 812208 байт |
 | ECM / WPA1 / bridge | PASS, 600240 байт |
 | ECM / WPA2 / bridge | PASS, 600208 байт |
+| RNDIS / WPA1 / bridge | PASS, 600192 байта |
+| RNDIS / WPA2 / bridge | PASS, 600144 байта |
+
+Для bridge проверен явный выбор WPA1/WPA2 вторым аргументом `tools/build.sh`
+с третьим аргументом `bridge`; отдельные каталоги исключают перенос настроек
+между вариантами. Собраны четыре полных bridge-образа с отдельными именами:
+`dist/psp-bridge-<usb>-<security>-v2.1.3.bin`. Их manifest —
+`dist/bridge-v2.1.3-manifest.json`, суммы — `dist/BRIDGE_WPA_SHA256SUMS`.
+ECM/WPA2 bridge также прошит и проверен на PSP: адрес 192.168.2.5 от компьютера,
+исходный MAC на bridge100, HTTP компьютера и прямой HTTP в интернет. После
+переподключения USB свежий HTTP 200 подтверждён на новом порту, исключающем кэш.
+Остальные новые bridge-образы пока проверены только сборкой.
+Рабочий образ router 2.1.3 сохранён.
+[Текущая проверка bridge/WPA2](docs/TEST_REPORT_BRIDGE_WPA2.md).
 
 ELF/config-проверки контролируют USB descriptors, размер/режим памяти,
 восстановление, единственный профиль защиты, режим router/bridge и отсутствие
