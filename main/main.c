@@ -21,6 +21,8 @@
 #include "router_network.h"
 #include "router_dns.h"
 #include "browser_proxy.h"
+#include "bridge_proxy.h"
+#include "bridge_dns.h"
 
 static const char *TAG = "psp_bridge";
 static EventGroupHandle_t s_events;
@@ -37,9 +39,15 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
             xEventGroupSetBits(s_events, AP_STARTED);
         } else if (id == WIFI_EVENT_AP_STACONNECTED) {
             const wifi_event_ap_staconnected_t *e = data;
+#if CONFIG_PSP_BRIDGE_PROXY
+            bridge_proxy_station_event(e->mac, true);
+#endif
             ESP_LOGI(TAG, "Wi-Fi client " MACSTR " joined (AID %d)", MAC2STR(e->mac), e->aid);
         } else if (id == WIFI_EVENT_AP_STADISCONNECTED) {
             const wifi_event_ap_stadisconnected_t *e = data;
+#if CONFIG_PSP_BRIDGE_PROXY
+            bridge_proxy_station_event(e->mac, false);
+#endif
             ESP_LOGI(TAG, "Wi-Fi client " MACSTR " left (reason %d)", MAC2STR(e->mac), e->reason);
         } else if (id == WIFI_EVENT_AP_WRONG_PASSWORD) {
             const wifi_event_ap_wrong_password_t *e = data;
@@ -205,12 +213,19 @@ void app_main(void)
     esp_netif_action_start(s_usb, NULL, 0, NULL);
 #if CONFIG_PSP_MODE_BRIDGE
     esp_netif_action_start(s_bridge, NULL, 0, NULL);
+#if CONFIG_PSP_BRIDGE_PROXY
+    ESP_ERROR_CHECK(esp_netif_set_hostname(s_bridge, PSP_PROXY_HOSTNAME));
+#endif
 #endif
     ESP_ERROR_CHECK(esp_wifi_start());
     EventBits_t bits = xEventGroupWaitBits(s_events, AP_STARTED, pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
     ESP_ERROR_CHECK((bits & AP_STARTED) ? ESP_OK : ESP_ERR_TIMEOUT);
 #if CONFIG_PSP_MODE_BRIDGE
     ESP_ERROR_CHECK(esp_netif_tcpip_exec(add_bridge_ports, NULL));
+#if CONFIG_PSP_BRIDGE_PROXY
+    bridge_proxy_init(s_bridge, s_ap);
+    browser_proxy_start();
+#endif
 #else
     router_network_init(s_usb, s_ap);
     router_dns_start();
@@ -228,6 +243,9 @@ void app_main(void)
 #if CONFIG_PSP_MODE_ROUTER
             router_network_poll(false);
 #else
+#if CONFIG_PSP_BRIDGE_PROXY
+            bridge_proxy_poll(false);
+#endif
             esp_netif_action_disconnected(s_bridge, NULL, 0, NULL);
 #endif
             esp_netif_action_disconnected(s_usb, NULL, 0, NULL);
@@ -246,6 +264,8 @@ void app_main(void)
         previous_epoch = usb.epoch;
 #if CONFIG_PSP_MODE_ROUTER
         router_network_poll(link_up);
+#elif CONFIG_PSP_BRIDGE_PROXY
+        bridge_proxy_poll(link_up);
 #endif
         /* Never stop/recreate a bridge port on USB resets: lwIP's FDB retains
          * netif pointers and has no remove-port API. Only change link/up state.

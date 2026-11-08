@@ -24,13 +24,15 @@ def main():
     parser.add_argument("build", type=Path)
     parser.add_argument("--profile", choices=["rndis", "ecm"], required=True)
     parser.add_argument("--security", choices=["wpa2", "wpa1", "open"], default="wpa2")
-    parser.add_argument("--mode", choices=["router", "bridge"], default="router")
+    parser.add_argument("--mode", choices=["router", "bridge", "bridge-proxy"], default="router")
     args = parser.parse_args()
     build = args.build.resolve()
     project = json.loads((build / "project_description.json").read_text())
     assert project["target"] == "esp32s3"
     config = Path(project["config_file"]).read_text()
     wpa_wrapper = args.security == "wpa1"
+    bridge = args.mode != "router"
+    bridge_proxy = args.mode == "bridge-proxy"
     required = [
         'CONFIG_ESPTOOLPY_FLASHSIZE="4MB"',
         "CONFIG_ESPTOOLPY_FLASHMODE_QIO=y",
@@ -43,17 +45,20 @@ def main():
         "CONFIG_COMPILER_OPTIMIZATION_SIZE=y",
         f"CONFIG_PSP_USB_{args.profile.upper()}=y",
         f"CONFIG_PSP_AP_{args.security.upper()}=y",
-        f"CONFIG_PSP_MODE_{args.mode.upper()}=y",
+        f"CONFIG_PSP_MODE_{'BRIDGE' if bridge else 'ROUTER'}=y",
     ]
     proxy_enabled = "CONFIG_PSP_HTTP_PROXY=y" in config.splitlines()
+    assert ("CONFIG_PSP_BRIDGE_PROXY=y" in config.splitlines()) == bridge_proxy
+    if bridge:
+        assert proxy_enabled == bridge_proxy, "Use a separate bridge-proxy build for the gateway"
     required += (["CONFIG_LWIP_IP_FORWARD=y", "CONFIG_LWIP_IPV4_NAPT=y", "CONFIG_LWIP_DHCPS=y",
                   "CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240"] if args.mode == "router"
                  else ["CONFIG_ESP_NETIF_BRIDGE_EN=y"])
     if proxy_enabled:
         required += ["CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y", "CONFIG_MBEDTLS_HAVE_TIME_DATE=y",
                      "CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y",
-                     "CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y"]
-    if args.mode == "router" and args.security == "wpa2":
+                     "CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y", "CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240"]
+    if bridge_proxy or (args.mode == "router" and args.security == "wpa2"):
         required += ["CONFIG_LWIP_DHCPS_STATIC_ENTRIES=y"]
     for setting in required:
         assert setting in config.splitlines(), f"Missing setting: {setting}"
@@ -115,15 +120,18 @@ def main():
             assert ms[30:38] == b"RNDIS\0\0\0" and ms[38:] == b"5162001\0"
             bos = read_symbol("bos_descriptor")
             assert len(bos) == 33 and bos[-2] == 0x20
-        if args.mode == "bridge":
+        if bridge:
             assert "bridgeif_add_port" in symbols and "ip_napt_enable_netif" not in symbols
-            assert "browser_proxy_start" not in symbols
+            assert "router_dns_start" not in symbols
+            assert "CONFIG_LWIP_IP_FORWARD=y" not in config.splitlines()
         else:
             assert "bridgeif_add_port" not in symbols and "ip_napt_enable_netif" in symbols
             assert "router_dns_start" in symbols
-            assert ("browser_proxy_start" in symbols) == proxy_enabled
-            if proxy_enabled:
-                assert "esp_crt_bundle_attach" in symbols
+        assert ("browser_proxy_start" in symbols) == proxy_enabled
+        if proxy_enabled:
+            assert "esp_crt_bundle_attach" in symbols
+        for name in ("bridge_proxy_intercept", "bridge_dns_frame_reply", "bridge_sync_neighbors"):
+            assert (name in symbols) == bridge_proxy, f"Wrong bridge DNS/ARP mode: {name}"
         assert ("__wrap_wpa_init" in symbols) == wpa_wrapper
         for name in ["__wrap_wpa_receive", "__wrap_hostapd_send_eapol", "__wrap_esp_wifi_internal_tx",
                      "wifi_diag_json", "wifi_diag_frame", "wifi_diag_set_eapol_version",

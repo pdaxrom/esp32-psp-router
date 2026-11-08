@@ -1,6 +1,6 @@
 idf_component_register(SRCS "main.c" "usb_net.c" "usb_descriptors.c" "usb_ecm_guard.c" "bridge_policy.c"
                             "router_policy.c" "router_network.c" "router_dns.c"
-                            "proxy_protocol.c" "browser_proxy.c"
+                            "proxy_protocol.c" "browser_proxy.c" "bridge_dns.c" "bridge_proxy.c"
                        INCLUDE_DIRS "."
                        REQUIRES esp_wifi esp_netif esp_event esp_psram esp_timer spi_flash
                                 nvs_flash esp_tinyusb lwip wpa_supplicant esp_http_client mbedtls)

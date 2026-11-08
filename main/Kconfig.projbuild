@@ -5,13 +5,21 @@ menu "PSP USB router"
         config PSP_MODE_ROUTER
             bool "USB WAN + Wi-Fi LAN, IPv4 NAPT and browser gateway"
         config PSP_MODE_BRIDGE
-            bool "Transparent USB/Wi-Fi bridge (previous firmware)"
+            bool "USB/Wi-Fi bridge (optional browser gateway)"
     endchoice
 
     config PSP_HTTP_PROXY
         bool "PSP HTTP to HTTPS browser gateway"
-        depends on PSP_MODE_ROUTER
-        default y
+        default y if PSP_MODE_ROUTER
+        default n
+        help
+            In bridge mode, also answers the exact DNS name psp-proxy for Wi-Fi
+            clients using the current bridge DHCP address. Other DNS and DHCP
+            traffic stays on the computer's network. No NAT or local DHCP server.
+
+    config PSP_BRIDGE_PROXY
+        bool
+        default y if PSP_MODE_BRIDGE && PSP_HTTP_PROXY
 
     config PSP_PROXY_PORT
         int "Browser proxy TCP port"

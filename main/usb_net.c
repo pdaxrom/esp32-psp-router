@@ -15,6 +15,7 @@
 #include "usb_descriptors.h"
 #include "usb_ecm_guard.h"
 #include "bridge_policy.h"
+#include "bridge_proxy.h"
 
 /* The netif TX callback runs in the TCP/IP task. It MUST NOT wait for the
  * TinyUSB task: that task also feeds the TCP/IP mailbox on reception.
@@ -46,6 +47,9 @@ static esp_err_t transmit(void *handle, void *buffer, size_t len)
     if (!atomic_load(&s_mounted) || atomic_load(&s_suspended) || len < 14 || len > 1514) {
         return ESP_ERR_INVALID_STATE;
     }
+#if CONFIG_PSP_BRIDGE_PROXY
+    if (bridge_proxy_intercept(buffer, len)) return ESP_OK;
+#endif
     tx_packet_t *packet = malloc(sizeof(*packet) + len);
     if (!packet) {
         return ESP_ERR_NO_MEM;

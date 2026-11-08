@@ -20,6 +20,7 @@
 #include "proxy_protocol.h"
 #include "router_network.h"
 #include "router_policy.h"
+#include "bridge_dns.h"
 
 #define PROXY_CLIENTS 2
 #define BODY_LIMIT (4 * 1024 * 1024)
@@ -137,10 +138,18 @@ static void home(int fd, bool head, router_network_state_t state)
     lan_errors = s_lan_stats.errors;
     last_lan_ip = s_lan_stats.last_ip;
     portEXIT_CRITICAL(&s_stats_lock);
+    char network[256];
+    if (state.bridge_mode) {
+        snprintf(network, sizeof(network), "Bridge IP: %s. USB internet: %s. Gateway: " IPSTR ". Upstream DNS: %s.",
+                 address, state.online ? "configured" : "offline", IP2STR(&state.lan.gw), dns);
+    } else {
+        snprintf(network, sizeof(network), "USB network: %s. WAN: %s. LAN: %s. Upstream DNS: %s.",
+                 state.online ? "configured" : "offline", wan, address, dns);
+    }
     int n = snprintf(html, capacity, "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
         "Connection: close\r\nCache-Control: no-store\r\n\r\n"
         "<!DOCTYPE HTML><html><head><title>PSP Router</title></head><body>"
-        "<h1>PSP Router</h1><p>USB network: %s. WAN: %s. LAN: %s. Upstream DNS: %s.</p>"
+        "<h1>PSP Router</h1><p>%s</p>"
         "<p>Network clock: %s.</p>"
         "<p>Browser proxy: %s:%d. Open http:// addresses; the router uses HTTPS to reach websites.</p>"
         "<form action='/open' method='GET'><input name='url' value='http://example.com/' size='35'>"
@@ -148,8 +157,8 @@ static void home(int fd, bool head, router_network_state_t state)
         "<p>Simple public pages only. GET/HEAD supported; logins, modern JavaScript, WebP/AVIF and video are not adapted.</p>"
         "<p>Fetches: %u. Last: %s, %u bytes, connection %u ms, total %u ms. "
         "Connection includes DNS, TCP and TLS; total includes delivery to this browser.</p>",
-        state.online ? "configured" : "offline", wan, address, dns,
-        time(NULL) >= 1704067200 ? "ready" : "synchronizing", address, CONFIG_PSP_PROXY_PORT,
+        network, time(NULL) >= 1704067200 ? "ready" : "synchronizing",
+        state.bridge_mode ? PSP_PROXY_HOSTNAME : address, CONFIG_PSP_PROXY_PORT,
         requests, complete ? "complete" : "not complete", bytes, connect_ms, total_ms);
     router_lan_status_t lan = router_network_lan_status();
     if (n <= 0 || (size_t)n >= capacity) goto end;
@@ -158,16 +167,23 @@ static void home(int fd, bool head, router_network_state_t state)
         "DHCP lookup: %s. ARP lookup: %s.</p>"
         "<p>LAN TCP connections: %u. HTTP requests: %u. Invalid/incomplete requests: %u. "
         "Last LAN peer: " IPSTR ".</p><ul>",
-        lan.up ? "up" : "down", lan.dhcp_running ? "running" : "stopped",
+        lan.up ? "up" : "down", lan.external_dhcp ? "computer" : lan.dhcp_running ? "running" : "stopped",
         lan.clients_valid ? "available" : "unavailable", lan.dhcp_valid ? "available" : "unavailable",
         lan.arp_valid ? "available" : "unavailable", lan_accepted, lan_requests, lan_errors,
         IP2STR(&last_lan_ip));
     if (written < 0 || (size_t)written >= capacity - n) goto end;
     n += written;
+    if (state.bridge_mode) {
+        written = snprintf(html + n, capacity - n,
+            "<li>Name psp-proxy: %u intercepted replies, %u direct DNS replies. "
+            "DHCP and default DNS are provided by the computer.</li>", lan.name_intercepted, lan.name_direct);
+        if (written < 0 || (size_t)written >= capacity - n) goto end;
+        n += written;
+    }
     for (unsigned i = 0; i < lan.count; ++i) {
         const router_wifi_client_t *client = &lan.clients[i];
         written = snprintf(html + n, capacity - n,
-            "<li>" MACSTR ": DHCP " IPSTR ", ARP " IPSTR ", RSSI %d dBm</li>",
+            "<li>" MACSTR ": client IP " IPSTR ", ARP " IPSTR ", RSSI %d dBm</li>",
             MAC2STR(client->mac), IP2STR(&client->dhcp_ip), IP2STR(&client->arp_ip), client->rssi);
         if (written < 0 || (size_t)written >= capacity - n) goto end;
         n += written;
@@ -188,7 +204,10 @@ end:
 
 static void local_request(int fd, proxy_request_t *request, router_network_state_t state)
 {
-    if (!strcmp(request->path, "/")) { home(fd, request->head, state); return; }
+    if (!strcmp(request->path, "/") || !strncmp(request->path, "/?", 2)) {
+        home(fd, request->head, state);
+        return;
+    }
     if (strncmp(request->path, "/open?url=", 10)) {
         message(fd, 404, "Not found. Open the proxy home page.\n", request->head);
         return;
@@ -342,6 +361,7 @@ static void worker(void *arg)
     bool local = request->local || !strcmp(request->host, address);
     snprintf(address, sizeof(address), IPSTR, IP2STR(&state.wan.ip));
     local = local || !strcmp(request->host, address);
+    local = local || (state.bridge_mode && bridge_dns_hostname(request->host));
     if (local) local_request(fd, request, state);
     else fetch(fd, request, state);
 end:
@@ -360,6 +380,12 @@ static void server(void *arg)
     uint32_t bound = 0;
     for (;;) {
         router_network_state_t state = router_network_state();
+        if (!state.lan.ip.addr || !state.lan.netmask.addr) {
+            if (listener >= 0) close(listener);
+            listener = -1;
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
         if (listener < 0 || bound != state.lan.ip.addr) {
             if (listener >= 0) close(listener);
             listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);

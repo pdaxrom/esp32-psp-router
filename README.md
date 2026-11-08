@@ -1,4 +1,4 @@
-# PSP Router 2.1.3 — ESP32-S3 USB WAN / Wi-Fi LAN
+# PSP Router 2.2.0 — ESP32-S3 USB / Wi-Fi
 
 Прошивка на C / ESP-IDF для Super Mini ESP32-S3 HW-747, проверенного чипа
 ESP32-S3FH4R2: **4 МиБ Flash, 2 МиБ Quad SPI PSRAM**. Дополнительные аппаратные
@@ -104,7 +104,8 @@ DNS relay и прокси принимают запросы только от Wi
 ## Плата и восстановление
 
 Flash: **4 МиБ QIO / 80 МГц**. PSRAM: **2 МиБ Quad SPI / 40 МГц**, не OPI.
-CPU в режиме router: **240 МГц**, аппаратные AES/SHA/RSA включены в IDF.
+CPU в режимах router и bridge-proxy: **240 МГц**, в обычном bridge — 160 МГц.
+Аппаратные AES/SHA/RSA включены в IDF.
 ROM проверенной платы определил Flash XMC 4MB и PSRAM AP_3v3 2MB; приложение
 измерило 4194304/2097152 байт. Перед запуском AP эти физические размеры проверяются;
 при несовпадении AP не запускается. Название HW-747 само по себе комплектацию
@@ -155,13 +156,15 @@ sh tools/build.sh rndis               # Windows, WPA2/AES, router + proxy
 sh tools/build.sh ecm wpa1 router      # WPA1/TKIP для PSP без WPA2-патча
 sh tools/build.sh ecm wpa1 bridge      # прозрачный bridge, WPA1/TKIP
 sh tools/build.sh ecm wpa2 bridge      # прозрачный bridge, WPA2/AES для ARK-5
+sh tools/build.sh ecm wpa2 bridge-proxy # bridge + HTTPS-шлюз, имя psp-proxy
+sh tools/build.sh rndis wpa2 bridge-proxy # то же для Windows
 sh tools/build.sh ecm open router     # явно открытая диагностическая сеть
 ```
 
-Аргументы: `[rndis|ecm] [wpa2|wpa1|open] [router|bridge]`.
+Аргументы: `[rndis|ecm] [wpa2|wpa1|open] [router|bridge|bridge-proxy]`.
 Каталоги отдельные: `build-ecm-wpa2-router`, `build-rndis-wpa2-router`,
 `build-ecm-wpa1-router`, `build-ecm-wpa1-bridge`, `build-ecm-wpa2-bridge`,
-`build-ecm-open-router`. Профили ОС выбираются при сборке;
+`build-ecm-open-router`, `build-ecm-wpa2-bridge-proxy`. Профили ОС выбираются при сборке;
 автоматического переключения защиты нет. VID/PID прототипа: RNDIS 303a:4011,
 ECM 303a:4012. Перед распространением устройства нужна назначенная VID/PID-пара.
 
@@ -185,7 +188,7 @@ WPA1 использует EAPOL v1, WPA2 — штатный EAPOL v2. SSID **PSP
 для WPA1 — выключенный WPA2 Support и профиль **TKIP**. После изменения
 WPA2 Support полностью перезапустите PSP. IP/DNS оставьте автоматическими,
 proxy — **Do Not Use**: в bridge адреса выдаёт компьютер в одной подсети,
-а HTTP→HTTPS шлюз доступен только в режиме router.
+а HTTP→HTTPS шлюз доступен в router и в отдельном bridge-proxy.
 
 Готовые bridge-образы имеют отдельные имена
 `dist/psp-bridge-<usb>-<security>-v2.1.3.bin` и записываются по **0x0**.
@@ -195,6 +198,72 @@ ECM/WPA2 bridge проверен на PSP: DHCP компьютера, локал
 а также свежий HTTP-запрос после переподключения USB. RNDIS bridge пока проверен
 только сборкой. Проверки router и bridge описаны раздельно.
 [Отдельная аппаратная проверка bridge/WPA2](docs/TEST_REPORT_BRIDGE_WPA2.md).
+
+### Bridge + proxy с именем psp-proxy
+
+Это отдельная сборка **2.2.0**, объединяющая прозрачный мост с тем же
+HTTP→HTTPS шлюзом, что и router. Обычный bridge остаётся без прокси.
+
+```sh
+sh tools/build.sh ecm wpa2 bridge-proxy
+# Каталог: build-ecm-wpa2-bridge-proxy
+# Windows: sh tools/build.sh rndis wpa2 bridge-proxy
+# WPA1/TKIP: sh tools/build.sh ecm wpa1 bridge-proxy
+```
+
+Компьютер по-прежнему выдаёт **и ESP, и PSP адреса в одной подсети**, например
+192.168.2.4 и 192.168.2.5. Шлюз и основной DNS PSP — компьютер, например
+192.168.2.1. ESP не запускает DHCP-сервер и не включает NAPT.
+
+На PSP оставьте IP/DNS **автоматическими**, а в настройках прокси укажите:
+
+- Адрес: **psp-proxy** (без `http://` и без `.local`).
+- Порт: **8080**.
+
+Стартовая страница: **http://psp-proxy:8080/**. Для проверки свежего запроса
+можно добавить `?check=1`, затем `?check=2`. Сайты открывайте с `http://`,
+например **http://zond.am/**; HTTPS до сайта и проверку сертификата выполняет ESP.
+Для прямого доступа игр и HTTP отключите proxy в профиле PSP.
+
+ESP отправляет DHCP hostname `psp-proxy`. Одного hostname недостаточно:
+проверенный Internet Sharing macOS не регистрирует его в обычном DNS.
+Поэтому в этой сборке ESP отвечает на точный DNS-запрос **psp-proxy** от
+подключённой Wi-Fi станции своим текущим DHCP-адресом. Ответ имеет TTL 0;
+при смене аренды новые запросы получают новый адрес. Остальные имена и
+DHCP-пакеты проходят через мост к компьютеру без изменения.
+
+Используется обычный **IPv4 UDP DNS, порт 53**; это не mDNS/Bonjour и не
+системная регистрация имени на компьютере. `psp-proxy.local`, DNS over TCP,
+DNSSEC и зашифрованные DNS-запросы не поддерживаются этим локальным ответчиком.
+Запросы компьютера к собственному DNS могут вообще не проходить через ESP,
+поэтому имя проверяется с PSP. На компьютере можно проверить его напрямую,
+подставив текущий адрес ESP из списка DHCP-аренд:
+
+```sh
+dig @192.168.2.4 psp-proxy A
+python tools/test_router_live.py 192.168.2.4 --mode bridge-proxy --site zond.am
+```
+
+Привязка IP/MAC для ответов самой ESP берётся только от подключённых Wi-Fi
+станций: из DNS-запроса или ARP. Она удаляется при отключении станции,
+USB или смене адреса/подсети ESP. Это сохраняет обход проблемы ARP старого
+клиента PSP без собственного DHCP-сервера. Прозрачный транзит не требует этой привязки.
+USB-консоли, трассировки WPA и команд изменения EAPOL в образе нет.
+
+Собранные WPA2-образы: `dist/psp-bridge-proxy-ecm-wpa2-v2.2.0.bin` и
+`dist/psp-bridge-proxy-rndis-wpa2-v2.2.0.bin` (объединённые, offset **0x0**).
+Для обновления с сохранением NVS используйте `idf.py flash` выбранного
+build-каталога: он записывает bootloader, partition table и app отдельно.
+Хэши и состав — `dist/BRIDGE_PROXY_SHA256SUMS` и
+`dist/bridge-proxy-v2.2.0-manifest.json`.
+
+Ограничения HTML/CSS, GET/HEAD и TLS те же, что у router. Рабочие образы
+router и bridge **2.1.3** сохранены отдельно; аппаратная проверка нового режима
+перечислена в [docs/TEST_REPORT_BRIDGE_PROXY.md](docs/TEST_REPORT_BRIDGE_PROXY.md).
+**ECM/WPA2 bridge-proxy 2.2.0 проверена на PSP:** стартовая страница по имени
+`psp-proxy` и zond.am через proxy открываются, в том числе по свежим URL после
+отключения и подключения USB. ESP подтвердила повторные Wi-Fi DNS-ответы
+и IP PSP в общей подсети компьютера.
 
 ### Пароль и другие настройки
 

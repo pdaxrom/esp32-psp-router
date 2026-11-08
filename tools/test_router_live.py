@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("wan_ip", type=ipaddress.IPv4Address)
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--mode", choices=["router", "bridge-proxy"], default="router")
     parser.add_argument("--report", help="Save measured results as JSON")
     parser.add_argument("--site", action="append", default=[],
                         help="Additional hostname to fetch over verified HTTPS (repeatable)")
@@ -56,7 +57,8 @@ def main():
 
     query_id = secrets.randbits(16)
     query = struct.pack("!HHHHHH", query_id, 0x100, 1, 0, 0, 0)
-    query += b"\x07example\x03com\0" + struct.pack("!HH", 1, 1)
+    name = b"\x09psp-proxy\0" if args.mode == "bridge-proxy" else b"\x07example\x03com\0"
+    query += name + struct.pack("!HH", 1, 1)
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as dns:
         dns.settimeout(4)
         dns.connect((str(args.wan_ip), 53))
@@ -64,7 +66,26 @@ def main():
         answer = dns.recv(1232)
     ident, flags, _, answers, _, _ = struct.unpack("!6H", answer[:12])
     assert ident == query_id and flags & 0x8000 and not flags & 15 and answers > 0
-    print("PASS: DNS relay returned an A response", flush=True)
+    if args.mode == "bridge-proxy":
+        assert answers == 1 and answer[-4:] == args.wan_ip.packed
+        assert struct.unpack("!I", answer[-10:-6])[0] == 0, "Dynamic name must have zero TTL"
+        status, body, _ = request("http://psp-proxy:%d/?test=%s" % (args.port, secrets.token_hex(4)))
+        assert status == 200 and b"Bridge IP:" in body and b"Browser proxy: psp-proxy:" in body
+        # A separate direct endpoint owns only the local name, not recursive DNS.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as dns:
+            dns.settimeout(1)
+            dns.sendto(query[:12] + b"\x07example\x03com\0" + struct.pack("!HH", 1, 1), (str(args.wan_ip), 53))
+            try:
+                other = dns.recv(1232)
+            except socket.timeout:
+                pass
+            else:
+                raise AssertionError(("Direct DNS answered an unrelated name", other))
+        results["bridge_proxy_name"] = {"name": "psp-proxy", "ip": str(args.wan_ip), "ttl": 0,
+                                        "endpoint_scope": "exact local name only"}
+        print("PASS: psp-proxy DNS address/TTL, named home page, other names not intercepted by local endpoint", flush=True)
+    else:
+        print("PASS: DNS relay returned an A response", flush=True)
 
     original = b'<!doctype html><title>PSP gateway test</title><a href="https://example.org/a">ok</a>'
     encoded = urllib.parse.quote(base64.urlsafe_b64encode(original).decode(), safe="")
@@ -142,7 +163,7 @@ def main():
         with open(args.report, "w") as output:
             json.dump(results, output, indent=2)
             output.write("\n")
-    print("PASS: all live checks; direct PSP NAPT/radio still requires PSP", flush=True)
+    print("PASS: live USB-host checks; PSP radio/bridge DNS interception still requires PSP", flush=True)
 
 
 if __name__ == "__main__":

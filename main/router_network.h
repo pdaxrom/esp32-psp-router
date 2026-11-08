@@ -5,6 +5,7 @@ typedef struct {
     esp_ip4_addr_t dns;
     uint32_t epoch;
     bool online;
+    bool bridge_mode;
 } router_network_state_t;
 #define ROUTER_MAX_WIFI_CLIENTS 4
 typedef struct {
@@ -13,7 +14,8 @@ typedef struct {
     int rssi;
 } router_wifi_client_t;
 typedef struct {
-    bool up, dhcp_running, clients_valid, dhcp_valid, arp_valid;
+    bool up, dhcp_running, clients_valid, dhcp_valid, arp_valid, external_dhcp;
+    unsigned name_intercepted, name_direct;
     unsigned count;
     router_wifi_client_t clients[ROUTER_MAX_WIFI_CLIENTS];
 } router_lan_status_t;

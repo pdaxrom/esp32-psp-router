@@ -7,6 +7,9 @@ cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
     -I main main/bridge_policy.c tests/test_bridge_policy.c -o "$test_binary"
 "$test_binary"
 cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
+    -I main main/bridge_dns.c tests/test_bridge_dns.c -o "$test_binary"
+"$test_binary"
+cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
     -I main main/router_policy.c main/proxy_protocol.c tests/test_router_proxy.c -o "$test_binary"
 "$test_binary"
 if [ ! -d managed_components/espressif__tinyusb/src ]; then
