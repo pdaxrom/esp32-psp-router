@@ -5,3 +5,7 @@
 /.cache/
 /dist/
 __pycache__/
+
+# Local test reports
+/TEST_REPORT*.md
+/docs/TEST_REPORT*.md
