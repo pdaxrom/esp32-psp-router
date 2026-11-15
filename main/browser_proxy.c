@@ -16,12 +16,15 @@
 #include "esp_mac.h"
 #include "esp_timer.h"
 #include "lwip/sockets.h"
+#include "mbedtls/platform_util.h"
 #include "browser_proxy.h"
 #include "proxy_protocol.h"
 #include "router_network.h"
 #include "router_policy.h"
 #include "bridge_dns.h"
 #include "status_rgb.h"
+#include "web_admin.h"
+#include "usb_net.h"
 
 #define PROXY_CLIENTS 2
 #define BODY_LIMIT (4 * 1024 * 1024)
@@ -68,7 +71,7 @@ static void message(int fd, int status, const char *text, bool head)
     }
 }
 
-static int read_header(int fd, char *buffer)
+static int read_header(int fd, char *buffer, size_t *received)
 {
     size_t used = 0;
     int64_t deadline = esp_timer_get_time() + 10000000;
@@ -80,7 +83,10 @@ static int read_header(int fd, char *buffer)
             used += n;
             buffer[used] = 0;
             char *end = strstr(buffer, "\r\n\r\n");
-            if (end) return end - buffer + 4;
+            if (end) {
+                *received = used;
+                return end - buffer + 4;
+            }
         } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
             fd_set set;
             FD_ZERO(&set);
@@ -90,6 +96,89 @@ static int read_header(int fd, char *buffer)
         } else return -400;
     }
     return used == PROXY_HEADER_MAX ? -431 : -408;
+}
+
+static int read_form(int fd, char *body, size_t length, const char *buffered, size_t buffered_length)
+{
+    if (buffered_length > length) return 400;
+    memcpy(body, buffered, buffered_length);
+    size_t used = buffered_length;
+    int64_t deadline = esp_timer_get_time() + 5000000;
+    while (used < length) {
+        if (esp_timer_get_time() >= deadline) return 408;
+        int n = recv(fd, body + used, length - used, 0);
+        if (n > 0) {
+            used += n;
+        } else if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+            fd_set set;
+            FD_ZERO(&set);
+            FD_SET(fd, &set);
+            struct timeval timeout = {.tv_usec = 200000};
+            select(fd + 1, &set, NULL, NULL, &timeout);
+        } else {
+            return 400;
+        }
+    }
+    if (memchr(body, 0, length)) return 400;
+    body[length] = '\0';
+    return 0;
+}
+
+static bool admin_authority(const proxy_request_t *request)
+{
+    if (!request->host[0] || request->port != CONFIG_PSP_PROXY_PORT) return false;
+    char authority[sizeof(request->host) + 6];
+    snprintf(authority, sizeof(authority), "%s:%u", request->host, request->port);
+    return !request->host_header || !strcasecmp(request->host_header, authority);
+}
+
+static web_admin_action_t admin_request(int fd, const proxy_request_t *request, proxy_admin_route_t route,
+                                         const char *buffered, size_t buffered_length)
+{
+    char body[PROXY_ADMIN_BODY_MAX + 1] = {0};
+    if (request->post) {
+        if (!request->content_type || strcasecmp(request->content_type, "application/x-www-form-urlencoded")) {
+            message(fd, 415, "Submit the form from the settings page.\n", false);
+            return WEB_ADMIN_ACTION_NONE;
+        }
+        int error = read_form(fd, body, request->content_length, buffered, buffered_length);
+        if (error) {
+            message(fd, error, "Invalid or incomplete settings form.\n", false);
+            mbedtls_platform_zeroize(body, sizeof(body));
+            return WEB_ADMIN_ACTION_NONE;
+        }
+    }
+    web_admin_reply_t *reply = calloc(1, sizeof(*reply));
+    if (!reply) {
+        message(fd, 503, "Out of resources. Retry later.\n", request->head);
+        mbedtls_platform_zeroize(body, sizeof(body));
+        return WEB_ADMIN_ACTION_NONE;
+    }
+    web_admin_handle(request, route, body, reply);
+    mbedtls_platform_zeroize(body, sizeof(body));
+    char cookie[160] = "";
+    if (reply->clear_cookie || reply->cookie[0]) {
+        snprintf(cookie, sizeof(cookie), "Set-Cookie: psp_admin=%s; Path=/admin; HttpOnly; SameSite=Strict%s\r\n",
+                 reply->cookie, reply->clear_cookie ? "; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT" : "");
+    }
+    char header[640];
+    size_t size = strlen(reply->html);
+    int n = snprintf(header, sizeof(header), "HTTP/1.0 %d PSP Router\r\n"
+                     "Content-Type: text/html; charset=utf-8\r\nContent-Length: %zu\r\n"
+                     "Connection: close\r\nCache-Control: no-store, no-cache, must-revalidate\r\n"
+                     "Pragma: no-cache\r\nExpires: 0\r\nX-Frame-Options: DENY\r\n"
+                     "X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n"
+                     "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; "
+                     "form-action 'self'; frame-ancestors 'none'; base-uri 'none'\r\n"
+                     "%s%s%s%s\r\n", reply->status, size, cookie,
+                     reply->location ? "Location: " : "", reply->location ? reply->location : "",
+                     reply->location ? "\r\n" : "");
+    if (n > 0 && (size_t)n < sizeof(header) && send_all(fd, header, n, 0) && !request->head) {
+        send_all(fd, reply->html, size, 0);
+    }
+    web_admin_action_t action = reply->action;
+    free(reply);
+    return action;
 }
 
 static void copy_header(char *target, size_t capacity, const char *value, response_meta_t *meta)
@@ -150,7 +239,8 @@ static void home(int fd, bool head, router_network_state_t state)
     int n = snprintf(html, capacity, "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
         "Connection: close\r\nCache-Control: no-store\r\n\r\n"
         "<!DOCTYPE HTML><html><head><title>PSP Router</title></head><body>"
-        "<h1>PSP Router</h1><p>%s</p>"
+        "<table width='100%%'><tr><td><h1>PSP Router</h1></td><td align='right'>"
+        "<a href='/admin/' style='padding:4px;border:1px solid'>Admin login</a></td></tr></table><p>%s</p>"
         "<p>Network clock: %s.</p>"
         "<p>Browser proxy: %s:%d. Open http:// addresses; the router uses HTTPS to reach websites.</p>"
         "<form action='/open' method='GET'><input name='url' value='http://example.com/' size='35'>"
@@ -348,10 +438,12 @@ static void worker(void *arg)
 {
     connection_t *connection = arg;
     int fd = connection->fd;
+    web_admin_action_t action = WEB_ADMIN_ACTION_NONE;
     char *header = malloc(PROXY_HEADER_MAX + 1);
     proxy_request_t *request = calloc(1, sizeof(*request));
     if (!header || !request) { message(fd, 503, "Out of resources.\n", false); goto end; }
-    int length = read_header(fd, header);
+    size_t received = 0;
+    int length = read_header(fd, header, &received);
     int error = length < 0 ? -length : proxy_parse_request(header, length, request);
     if (connection->lan) {
         portENTER_CRITICAL(&s_stats_lock);
@@ -360,7 +452,8 @@ static void worker(void *arg)
         portEXIT_CRITICAL(&s_stats_lock);
     }
     if (error) {
-        message(fd, error, "Only GET/HEAD with http:// addresses are supported. CONNECT keeps PSP TLS and is unavailable.\n", request->head);
+        message(fd, error, error == 405 ? "The browser proxy supports GET and HEAD.\n" :
+                "Invalid or incomplete HTTP request.\n", request->head);
         goto end;
     }
     router_network_state_t state = router_network_state();
@@ -371,15 +464,32 @@ static void worker(void *arg)
     snprintf(address, sizeof(address), IPSTR, IP2STR(&state.wan.ip));
     local = local || !strcmp(request->host, address);
     local = local || (state.bridge_mode && bridge_dns_hostname(request->host));
-    if (local) local_request(fd, request, state);
-    else fetch(fd, request, state);
+    proxy_admin_route_t route = local ? proxy_admin_route(request->path) : PROXY_ADMIN_NONE;
+    if (route != PROXY_ADMIN_NONE && admin_authority(request)) {
+        action = admin_request(fd, request, route, header + length, received - (size_t)length);
+    } else if (request->post) {
+        message(fd, 405, "The browser proxy supports GET and HEAD.\n", false);
+    } else if (local) {
+        local_request(fd, request, state);
+    } else {
+        fetch(fd, request, state);
+    }
 end:
+    if (header) mbedtls_platform_zeroize(header, PROXY_HEADER_MAX + 1);
     free(header);
     free(request);
     shutdown(fd, SHUT_RDWR);
     close(fd);
     free(connection);
     xSemaphoreGive(s_slots);
+    if (action == WEB_ADMIN_APPLY_WIFI) {
+        /* Let a browser on Wi-Fi receive the reply before disconnecting. */
+        vTaskDelay(pdMS_TO_TICKS(500));
+        web_admin_apply_pending_wifi();
+    } else if (action == WEB_ADMIN_RESTART_ROM) {
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        usb_net_restart_to_rom();
+    }
     vTaskDelete(NULL);
 }
 
@@ -469,6 +579,7 @@ static void server(void *arg)
 
 void browser_proxy_start(void)
 {
+    web_admin_init();
     s_slots = xSemaphoreCreateCounting(PROXY_CLIENTS, PROXY_CLIENTS);
     ESP_ERROR_CHECK(s_slots ? ESP_OK : ESP_ERR_NO_MEM);
     ESP_ERROR_CHECK(xTaskCreate(server, "browser_proxy", 4096, NULL, 4, NULL) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);

@@ -43,7 +43,7 @@ Defaults: `rndis wpa2 router`. Each combination has its own
 `build-<usb>-<security>-<mode>` directory. `open` explicitly selects an unsecured
 diagnostic network; security never switches automatically.
 
-To change the password, proxy port or RGB settings, open **PSP USB router**:
+To change the built-in Wi-Fi password, proxy port or RGB settings, open **PSP USB router**:
 
 ```sh
 idf.py -B build-ecm-wpa2-bridge-proxy \
@@ -104,7 +104,34 @@ protected Wi-Fi connection. Wait for network time synchronization after boot.
 
 The gateway is for simple public pages: GET/HEAD, two concurrent requests,
 up to 4 MiB per response. It does not adapt modern CSS/JavaScript, logins or video,
-and does not support POST or CONNECT. HTTP-only sites require direct access.
+and does not forward POST or CONNECT. HTTP-only sites require direct access.
+
+## Admin settings
+
+Open the proxy home page and click **Admin login**. The initial username and
+password are `admin` / `admin`. From the USB-connected computer, use the ESP's
+DHCP address if `psp-proxy` does not resolve. Use the admin page over a trusted
+local connection because the login uses HTTP.
+Allow cookies in the browser. **Logout** ends the current admin session.
+
+- **Wi-Fi** changes the network name (1–32 printable ASCII characters) and the
+  Wi-Fi password (8–63 printable ASCII characters). Leave the password blank to
+  keep it. Wi-Fi clients reconnect with the new settings. USB stays connected.
+- **Administrator** changes the login password (8–63 printable ASCII characters).
+  The username is `admin`. Sign in again with the new password after saving.
+- **Reboot to bootloader** enters ROM download mode. Wi-Fi and USB Ethernet stop,
+  and the ESP appears as a USB serial port for flashing. From the selected build
+  directory, use esptool to flash and return to the application with a watchdog reset:
+
+  ```sh
+  python -m esptool --chip esp32s3 -p /dev/cu.usbmodemXXXX \
+    --before no-reset --after watchdog-reset write-flash @flash_args
+  ```
+
+  To exit without flashing, press RESET or replace `write-flash @flash_args` with `read-mac`.
+
+Settings are stored in NVS and survive `idf.py flash`. The admin page is available
+in `router` and `bridge-proxy` builds. The build profile selects Wi-Fi security.
 
 ## RGB status
 

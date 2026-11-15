@@ -21,6 +21,14 @@ int main(void)
     password[64] = 0;
     assert(!bridge_password_valid(password));
 
+    assert(!bridge_ssid_valid(NULL));
+    assert(!bridge_ssid_valid("   "));
+    assert(bridge_ssid_valid("PSP Living Room"));
+    assert(!bridge_ssid_valid("PSP\tNET"));
+    assert(!bridge_ssid_valid("PSP\xc3\xa9"));
+    assert(bridge_ssid_valid("12345678901234567890123456789012"));
+    assert(!bridge_ssid_valid("123456789012345678901234567890123"));
+
     /* Queued frames from a previous enumeration must never reach a new host. */
     assert(bridge_frame_current(1, 1, 0, 14));
     assert(bridge_frame_current(UINT32_MAX, UINT32_MAX, 500, 1514));
@@ -30,6 +38,6 @@ int main(void)
     assert(!bridge_frame_current(0, 0, UINT32_MAX, 1514));
     assert(!bridge_frame_current(0, 0, 0, 13));
     assert(!bridge_frame_current(0, 0, 0, 1515));
-    puts("PASS: 17 security/frame-lifetime boundary cases");
+    puts("PASS: Wi-Fi password, network name and frame lifetime boundary cases");
     return 0;
 }

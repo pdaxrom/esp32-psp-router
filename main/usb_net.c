@@ -16,6 +16,15 @@
 #include "usb_ecm_guard.h"
 #include "bridge_policy.h"
 #include "bridge_proxy.h"
+#if CONFIG_PSP_HTTP_PROXY
+#include "freertos/task.h"
+#include "esp_efuse.h"
+#include "esp_efuse_table.h"
+#include "esp_system.h"
+#include "hal/usb_serial_jtag_hal.h"
+#include "soc/rtc_cntl_reg.h"
+#include "soc/soc.h"
+#endif
 
 /* The netif TX callback runs in the TCP/IP task. It MUST NOT wait for the
  * TinyUSB task: that task also feeds the TCP/IP mailbox on reception.
@@ -218,3 +227,28 @@ usb_net_status_t usb_net_status(void)
         .epoch = atomic_load(&s_epoch),
     };
 }
+
+#if CONFIG_PSP_HTTP_PROXY
+bool usb_net_rom_available(void)
+{
+    return !esp_efuse_read_field_bit(ESP_EFUSE_DIS_FORCE_DOWNLOAD) &&
+           !esp_efuse_read_field_bit(ESP_EFUSE_DIS_DOWNLOAD_MODE) &&
+           !esp_efuse_read_field_bit(ESP_EFUSE_DIS_USB_SERIAL_JTAG) &&
+           !esp_efuse_read_field_bit(ESP_EFUSE_DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE) &&
+           !esp_efuse_read_field_bit(ESP_EFUSE_USB_PHY_SEL);
+}
+
+void usb_net_restart_to_rom(void)
+{
+    usb_net_accept_rx(false);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(tinyusb_driver_uninstall());
+    atomic_store(&s_mounted, false);
+    atomic_fetch_add(&s_epoch, 1);
+    /* Let the host observe the ECM/RNDIS detach before the new USB device. */
+    vTaskDelay(pdMS_TO_TICKS(250));
+    /* ROM entry needs the PHY selection and download flag to survive reset. */
+    usb_serial_jtag_hal_phy_set_external(NULL, false);
+    REG_SET_BIT(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+    esp_restart();
+}
+#endif

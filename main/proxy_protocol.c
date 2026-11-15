@@ -18,6 +18,40 @@ static bool token(unsigned char c)
     return isalnum(c) || strchr("!#$%&'*+-.^_`|~", c) != NULL;
 }
 
+proxy_admin_route_t proxy_admin_route(const char *path)
+{
+    if (!strcmp(path, "/admin") || !strcmp(path, "/admin/") ||
+        !strcmp(path, "/admin?") || !strcmp(path, "/admin/?")) return PROXY_ADMIN_PAGE;
+    if (!strcmp(path, "/admin/login")) return PROXY_ADMIN_LOGIN;
+    if (!strcmp(path, "/admin/logout")) return PROXY_ADMIN_LOGOUT;
+    if (!strcmp(path, "/admin/wifi")) return PROXY_ADMIN_WIFI;
+    if (!strcmp(path, "/admin/password")) return PROXY_ADMIN_PASSWORD;
+    if (!strcmp(path, "/admin/bootloader")) return PROXY_ADMIN_BOOTLOADER;
+    return PROXY_ADMIN_NONE;
+}
+
+bool proxy_admin_cookie(const char *header, char token[PROXY_ADMIN_TOKEN_LENGTH + 1])
+{
+    static const char name[] = "psp_admin=";
+    bool found = false;
+    while (header && *header) {
+        header += strspn(header, " \t");
+        const char *end = header + strcspn(header, ";");
+        if ((size_t)(end - header) >= sizeof(name) - 1 && !strncmp(header, name, sizeof(name) - 1)) {
+            const char *value = header + sizeof(name) - 1;
+            const char *value_end = end;
+            while (value_end > value && (value_end[-1] == ' ' || value_end[-1] == '\t')) --value_end;
+            if (found || value_end - value != PROXY_ADMIN_TOKEN_LENGTH ||
+                strspn(value, "0123456789abcdef") != PROXY_ADMIN_TOKEN_LENGTH) return false;
+            memcpy(token, value, PROXY_ADMIN_TOKEN_LENGTH);
+            token[PROXY_ADMIN_TOKEN_LENGTH] = '\0';
+            found = true;
+        }
+        header = *end ? end + 1 : end;
+    }
+    return found;
+}
+
 int proxy_https_url(const char *input, proxy_request_t *r)
 {
     const char *authority;
@@ -70,16 +104,16 @@ int proxy_parse_request(char *header, size_t length, proxy_request_t *r)
     if (!r || length < 4 || length > PROXY_HEADER_MAX || memchr(header, 0, length) ||
         memcmp(header + length - 4, "\r\n\r\n", 4)) return 400;
     memset(r, 0, sizeof(*r));
-    header[length] = 0;
-    header[length - 2] = 0; /* Empty line terminates the header iterator. */
+    header[length - 2] = 0; /* Terminate the header without touching any buffered body. */
     char *line_end = strstr(header, "\r\n");
     if (!line_end) return 400;
     *line_end = 0;
     char *target = strchr(header, ' ');
     if (!target) return 400;
     *target++ = 0;
-    if (strcmp(header, "GET") && strcmp(header, "HEAD")) return 405;
     r->head = !strcmp(header, "HEAD");
+    r->post = !strcmp(header, "POST");
+    if (!r->head && !r->post && strcmp(header, "GET")) return 405;
     char *version = strchr(target, ' ');
     if (!version) return 400;
     *version++ = 0;
@@ -91,7 +125,8 @@ int proxy_parse_request(char *header, size_t length, proxy_request_t *r)
         int error = proxy_https_url(target, r);
         if (error) return error;
     }
-    bool content_length = false, host = false;
+    if (r->post && proxy_admin_route(r->path) < PROXY_ADMIN_LOGIN) return 405;
+    bool content_length = false, duplicate_cookie = false;
     for (char *line = line_end + 2; *line;) {
         char *next = strstr(line, "\r\n");
         if (!next) return 400;
@@ -108,18 +143,35 @@ int proxy_parse_request(char *header, size_t length, proxy_request_t *r)
         for (char *p = colon; *p; ++p) if (((unsigned char)*p < 32 && *p != '\t') || *p == 127) return 400;
         if (!strcasecmp(line, "Transfer-Encoding")) return 400;
         if (!strcasecmp(line, "Host")) {
-            if (host || !*colon) return 400;
-            host = true;
+            if (r->host_header || !*colon) return 400;
+            r->host_header = colon;
             if (r->local && !copy(r->host, sizeof(r->host), colon)) return 431;
         }
         if (!strcasecmp(line, "Content-Length")) {
-            if (content_length || !*colon || strspn(colon, "0") != strlen(colon)) return 400;
+            if (content_length || !*colon) return 400;
             content_length = true;
+            for (const char *digit = colon; *digit; ++digit) {
+                if (*digit < '0' || *digit > '9') return 400;
+                if (!r->post && *digit != '0') return 400;
+                r->content_length = r->content_length * 10 + (*digit - '0');
+                if (r->content_length > PROXY_ADMIN_BODY_MAX) return 413;
+            }
+        }
+        if (!strcasecmp(line, "Cookie")) {
+            if (r->cookie) duplicate_cookie = true;
+            r->cookie = colon;
+        }
+        if (r->post && !strcasecmp(line, "Content-Type")) {
+            if (r->content_type) return 400;
+            r->content_type = colon;
         }
         if (!strcasecmp(line, "User-Agent") && !copy(r->user_agent, sizeof(r->user_agent), colon)) return 431;
         if (!strcasecmp(line, "Accept") && !copy(r->accept, sizeof(r->accept), colon)) return 431;
         line = next + 2;
     }
+    if (duplicate_cookie) r->cookie = NULL;
+    if (r->post && !content_length) return 411;
+    if (r->post && !r->content_length) return 400;
     if (r->local && r->host[0]) {
         int n = snprintf(r->url, sizeof(r->url), "http://%s%s", r->host, r->path);
         if (n < 0 || (size_t)n >= sizeof(r->url)) return 414;
@@ -137,7 +189,7 @@ static int hex(unsigned char c)
     return c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
 }
 
-bool proxy_decode_query(const char *input, char *output, size_t capacity)
+static bool decode(const char *input, char *output, size_t capacity, bool allow_space)
 {
     size_t used = 0;
     for (size_t i = 0; input[i]; ++i) {
@@ -149,12 +201,39 @@ bool proxy_decode_query(const char *input, char *output, size_t capacity)
             c = (a << 4) | b;
             i += 2;
         } else if (c == '+') c = ' ';
-        if (c <= 32 || c == 127 || used + 1 >= capacity) return false;
+        if (c < 32 || (c == 32 && !allow_space) || c == 127 || used + 1 >= capacity) return false;
         output[used++] = c;
     }
     if (!capacity) return false;
     output[used] = 0;
     return true;
+}
+
+bool proxy_decode_query(const char *input, char *output, size_t capacity)
+{
+    return decode(input, output, capacity, false);
+}
+
+bool proxy_parse_form(char *body, const proxy_form_field_t *fields, size_t count)
+{
+    unsigned seen = 0;
+    if (count > 8) return false;
+    while (*body) {
+        char *next = strchr(body, '&');
+        if (next) *next++ = '\0';
+        char *value = strchr(body, '=');
+        if (!value) return false;
+        *value++ = '\0';
+        size_t index = 0;
+        while (index < count && strcmp(body, fields[index].name)) ++index;
+        if (index == count || (seen & (1u << index))) return false;
+        if (!decode(value, fields[index].value, fields[index].capacity, true)) return false;
+        seen |= 1u << index;
+        if (!next) break;
+        if (!*next) return false;
+        body = next;
+    }
+    return seen == (1u << count) - 1;
 }
 
 size_t proxy_rewrite(proxy_rewriter_t *s, const char *input, size_t length, char *output)

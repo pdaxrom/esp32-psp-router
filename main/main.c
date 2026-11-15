@@ -3,7 +3,6 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
 #include "esp_event.h"
 #include "esp_flash.h"
 #include "esp_log.h"
@@ -24,21 +23,17 @@
 #include "bridge_proxy.h"
 #include "bridge_dns.h"
 #include "status_rgb.h"
+#include "router_settings.h"
 
 static const char *TAG = "psp_bridge";
-static EventGroupHandle_t s_events;
 static esp_netif_t *s_usb, *s_ap;
 #if CONFIG_PSP_MODE_BRIDGE
 static esp_netif_t *s_bridge;
 #endif
-#define AP_STARTED BIT0
-
 static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     if (base == WIFI_EVENT) {
-        if (id == WIFI_EVENT_AP_START) {
-            xEventGroupSetBits(s_events, AP_STARTED);
-        } else if (id == WIFI_EVENT_AP_STACONNECTED) {
+        if (id == WIFI_EVENT_AP_STACONNECTED) {
             const wifi_event_ap_staconnected_t *e = data;
             status_rgb_station(e->mac, true);
 #if CONFIG_PSP_BRIDGE_PROXY
@@ -77,7 +72,7 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
 #endif
 }
 
-static void init_wifi(void)
+static void init_wifi(const router_wifi_settings_t *settings)
 {
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&init));
@@ -85,8 +80,6 @@ static void init_wifi(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     wifi_config_t config = {
         .ap = {
-            .ssid = "PSP-NET",
-            .ssid_len = 7,
             .ssid_hidden = 0,
             .channel = 6,
             .max_connection = 4,
@@ -96,16 +89,19 @@ static void init_wifi(void)
 #if CONFIG_PSP_AP_OPEN
             .authmode = WIFI_AUTH_OPEN,
 #elif CONFIG_PSP_AP_WPA2
-            .password = CONFIG_PSP_AP_PASSWORD,
             .authmode = WIFI_AUTH_WPA2_PSK,
             .pairwise_cipher = WIFI_CIPHER_TYPE_CCMP,
 #else
-            .password = CONFIG_PSP_AP_PASSWORD,
             .authmode = WIFI_AUTH_WPA_PSK,
             .pairwise_cipher = WIFI_CIPHER_TYPE_TKIP,
 #endif
         },
     };
+    config.ap.ssid_len = strlen(settings->ssid);
+    memcpy(config.ap.ssid, settings->ssid, config.ap.ssid_len);
+#if !CONFIG_PSP_AP_OPEN
+    memcpy(config.ap.password, settings->password, strlen(settings->password));
+#endif
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &config));
     ESP_ERROR_CHECK(esp_wifi_disable_pmf_config(WIFI_IF_AP));
     ESP_ERROR_CHECK(esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B));
@@ -145,7 +141,6 @@ static void init_wifi(void)
 #endif
     s_ap = esp_netif_create_wifi(WIFI_IF_AP, &ap);
     ESP_ERROR_CHECK(s_ap ? ESP_OK : ESP_ERR_NO_MEM);
-    ESP_ERROR_CHECK(esp_wifi_set_default_wifi_ap_handlers());
 }
 
 #if CONFIG_PSP_MODE_BRIDGE
@@ -167,8 +162,6 @@ void app_main(void)
     ESP_ERROR_CHECK(ret);
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    s_events = xEventGroupCreate();
-    ESP_ERROR_CHECK(s_events ? ESP_OK : ESP_ERR_NO_MEM);
     uint8_t mac[6];
     ESP_ERROR_CHECK(esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP));
     ESP_LOGI(TAG, "Creating native USB Ethernet port");
@@ -181,10 +174,12 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_flash_get_physical_size(NULL, &s_flash_size));
     size_t s_psram_size = esp_psram_is_initialized() ? esp_psram_get_size() : 0;
     bool memory_ok = s_flash_size == 4 * 1024 * 1024 && s_psram_size == 2 * 1024 * 1024;
+    router_wifi_settings_t wifi_settings;
+    router_wifi_settings_load(&wifi_settings);
 #if CONFIG_PSP_AP_OPEN
     const bool password_ok = true;
 #else
-    const bool password_ok = bridge_password_valid(CONFIG_PSP_AP_PASSWORD);
+    const bool password_ok = bridge_password_valid(wifi_settings.password);
 #endif
     while (!memory_ok || !password_ok) {
         ESP_LOGE(TAG, "AP stopped: detected Flash=%" PRIu32 " PSRAM=%u; expected 4194304/2097152 bytes; passphrase %s",
@@ -193,7 +188,7 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "Configuring PSP SoftAP");
-    init_wifi();
+    init_wifi(&wifi_settings);
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, event_handler, NULL));
 #if CONFIG_PSP_MODE_BRIDGE
@@ -220,9 +215,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_set_hostname(s_bridge, PSP_PROXY_HOSTNAME));
 #endif
 #endif
-    ESP_ERROR_CHECK(esp_wifi_start());
-    EventBits_t bits = xEventGroupWaitBits(s_events, AP_STARTED, pdFALSE, pdTRUE, pdMS_TO_TICKS(5000));
-    ESP_ERROR_CHECK((bits & AP_STARTED) ? ESP_OK : ESP_ERR_TIMEOUT);
+    ESP_ERROR_CHECK(router_wifi_ap_start(s_ap));
 #if CONFIG_PSP_MODE_BRIDGE
     ESP_ERROR_CHECK(esp_netif_tcpip_exec(add_bridge_ports, NULL));
 #if CONFIG_PSP_BRIDGE_PROXY

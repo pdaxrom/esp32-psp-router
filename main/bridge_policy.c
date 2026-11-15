@@ -24,3 +24,14 @@ bool bridge_frame_current(uint32_t packet_epoch, uint32_t usb_epoch,
 {
     return packet_epoch == usb_epoch && age_ms <= 500 && length >= 14 && length <= 1514;
 }
+
+bool bridge_ssid_valid(const char *ssid)
+{
+    if (!ssid) return false;
+    size_t length = strlen(ssid);
+    if (!length || length > 32) return false;
+    for (size_t i = 0; i < length; ++i) {
+        if ((unsigned char)ssid[i] < 32 || (unsigned char)ssid[i] > 126) return false;
+    }
+    return strspn(ssid, " ") != length;
+}

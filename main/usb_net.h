@@ -12,3 +12,5 @@ esp_netif_t *usb_net_create(const uint8_t bridge_mac[6]);
 void usb_net_start(void);
 void usb_net_accept_rx(bool accept);
 usb_net_status_t usb_net_status(void);
+bool usb_net_rom_available(void);
+void usb_net_restart_to_rom(void);
